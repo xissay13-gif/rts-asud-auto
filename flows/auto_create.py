@@ -743,6 +743,7 @@ def main():
     global settings
     settings = cfg.load()
     cfg.setup_file_logger("auto_create")
+    cfg.keep_system_awake(True)
 
     log.info("=" * 50)
     log.info("АСУД ИК — Входящие + автосоздание корреспондентов")
@@ -866,7 +867,11 @@ def main():
         log.error(f"Ошибка: {e}")
         input("Enter...")
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        cfg.keep_system_awake(False)
 
 
 if __name__ == "__main__":
