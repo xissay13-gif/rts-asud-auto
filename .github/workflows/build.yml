@@ -50,6 +50,7 @@ jobs:
       run: |
         copy asud_headless.bat dist\
         copy asud_email_watch.bat dist\
+        copy asud_auto_create_headless.bat dist\
         copy settings.json.example dist\
 
     - name: Upload artifact
@@ -60,4 +61,5 @@ jobs:
           dist/asud.exe
           dist/asud_headless.bat
           dist/asud_email_watch.bat
+          dist/asud_auto_create_headless.bat
           dist/settings.json.example
