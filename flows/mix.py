@@ -424,8 +424,50 @@ def fill_delivery_method(driver):
         log.warning(f"'{target_text}' не найдена в списке")
 
 
+def _addressee_chip_present(driver, inp, surname):
+    """True если рядом с input появился chip с фамилией адресата
+    (или сам input содержит её). Проверяется в parent-цепочке вверх до 5 уровней.
+    """
+    surname_lower = surname.lower()
+    try:
+        val = (inp.get_attribute("value") or "").lower()
+        if surname_lower in val:
+            return True
+    except Exception:
+        pass
+    try:
+        parent = inp
+        for _ in range(5):
+            parent = parent.find_element(By.XPATH, "..")
+            txts = parent.find_elements(By.XPATH,
+                f".//*[contains(normalize-space(text()), '{surname}')]")
+            for el in txts:
+                try:
+                    if el.is_displayed() and el != inp:
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
+def _poll_addressee_chip(driver, inp, surname, timeout=3):
+    """Поллинг до timeout секунд — ждём появления chip-а."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if _addressee_chip_present(driver, inp, surname):
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def add_addressee(driver, person_name):
-    """Добавляет одного адресата через combobox."""
+    """Добавляет одного адресата через combobox.
+    Multi-strategy click + проверка появления chip — GXT не всегда
+    пропагирует value сразу после ActionChains.click.
+    """
+    from shared.ui import cdp_click
     inp = find_input_near_label(driver, "Адресаты")
     if not inp:
         log.warning("Поле адресата не найдено")
@@ -433,8 +475,6 @@ def add_addressee(driver, person_name):
 
     surname = person_name.split()[0]
     inp.click()
-    # Combobox-autocomplete — JS-set + dispatch input/keyup, чтобы GXT
-    # перерисовал выпадашку без посимвольного ввода.
     js_type_combobox(driver, inp, surname)
 
     from shared.correspondent import match_correspondent
@@ -464,12 +504,78 @@ def add_addressee(driver, person_name):
     if not target and all_results:
         target = all_results[0]
 
-    if target:
+    if not target:
+        log.warning(f"Адресат не найден в выпадашке: {person_name}")
+        return
+
+    # Найти parent-option (как в correspondent) — для GXT клик нужен по option,
+    # не по внутреннему span'у.
+    parent_option = None
+    try:
+        parent_option = driver.execute_script("""
+            let el = arguments[0];
+            for (let i = 0; i < 6 && el; i++) {
+                el = el.parentElement;
+                if (!el) break;
+                const role = el.getAttribute('role');
+                const cls = (el.className || '').toString().toLowerCase();
+                if (role === 'option' ||
+                    /\\b(option|item|menu-item|select-option|combo-item|boundlist-item|ListItem|SelectItem)\\b/i.test(cls) ||
+                    /gxt-\\w*item|x-combo-list-item|x-boundlist-item/i.test(cls)) {
+                    return el;
+                }
+            }
+            return null;
+        """, target)
+    except Exception:
+        pass
+
+    try:
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", target)
+    except Exception:
+        pass
+
+    # Стратегия 1: CDP trusted-click по parent-option (если есть) или target
+    cdp_target = parent_option if parent_option is not None else target
+    log.debug(f"Адресат strat1: CDP click по {'parent-option' if parent_option else 'target'}")
+    if cdp_click(driver, cdp_target):
+        if _poll_addressee_chip(driver, inp, surname):
+            log.info(f"Адресат добавлен (CDP): {person_name}")
+            return
+
+    # Стратегия 2: ActionChains click по target
+    log.debug("Адресат strat2: AC click по target")
+    try:
         ActionChains(driver).move_to_element(target).pause(0.2).click().perform()
-        log.info(f"Адресат добавлен: {person_name}")
-    else:
-        log.warning(f"Адресат не найден: {person_name}")
+    except Exception as e:
+        log.debug(f"  AC click err: {e}")
+    if _poll_addressee_chip(driver, inp, surname):
+        log.info(f"Адресат добавлен (AC): {person_name}")
+        return
+
+    # Стратегия 3: ActionChains click по parent-option (если есть)
+    if parent_option is not None:
+        log.debug("Адресат strat3: AC click по parent-option")
+        try:
+            ActionChains(driver).move_to_element(parent_option).pause(0.2).click().perform()
+        except Exception as e:
+            log.debug(f"  AC parent err: {e}")
+        if _poll_addressee_chip(driver, inp, surname):
+            log.info(f"Адресат добавлен (AC parent): {person_name}")
+            return
+
+    # Стратегия 4: Enter
+    log.debug("Адресат strat4: Enter")
+    try:
+        ActionChains(driver).send_keys(Keys.ENTER).perform()
+    except Exception:
+        pass
+    if _poll_addressee_chip(driver, inp, surname, timeout=4):
+        log.info(f"Адресат добавлен (Enter): {person_name}")
+        return
+
+    log.warning(f"Адресат: все 4 стратегии не сработали для '{person_name}' "
+                f"(клик прошёл, но chip не появился)")
 
 
 # ================= REGISTRATION =================
