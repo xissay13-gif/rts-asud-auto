@@ -33,10 +33,10 @@ DEFAULTS = {
     # zhkh_complete_user    — фрагмент ФИО для переключения учётки перед «Завершить»
     # zhkh_initial_user     — фрагмент ФИО для возврата (пусто = не возвращать)
     # zhkh_sidebar_section  — название пункта sidebar у юзера-завершителя.
-    #                         У Басманова документы лежат в «На исполнение».
+    #                         У Басманова документы лежат в «На резолюцию».
     "zhkh_complete_user": "Басманов",
     "zhkh_initial_user": "",
-    "zhkh_sidebar_section": "На исполнение",
+    "zhkh_sidebar_section": "На резолюцию",
     # Пресеты сценариев — список словарей с name + mode + folder.
     # Зашиты дефолтные пути для ОЭК (smart) и ТЭС (mix). Чтобы переопределить
     # без пересборки — создать settings.json рядом с exe (см. settings.json.example).
