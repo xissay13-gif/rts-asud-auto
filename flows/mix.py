@@ -294,15 +294,20 @@ def fill_text(driver, text):
         log.error(f"Ошибка заполнения содержания: {e}")
 
 
-def fill_corr_number(driver, link=None):
-    """Заполняет 'Номер у корреспондента' = 'б/н <link>'."""
-    if isinstance(link, (datetime, date)):
-        link_str = link.strftime("%d.%m.%Y %H-%M-%S")
-    elif link:
-        link_str = str(link).strip()
+def fill_corr_number(driver, link=None, override=None):
+    """Заполняет 'Номер у корреспондента'.
+    override (если задан) — использовать как есть (для ZHKH: реальный № обращения).
+    Иначе — формат 'б/н <link>' (текущее поведение)."""
+    if override:
+        value = str(override).strip()
     else:
-        link_str = ""
-    value = f"б/н {link_str}" if link_str else "б/н"
+        if isinstance(link, (datetime, date)):
+            link_str = link.strftime("%d.%m.%Y %H-%M-%S")
+        elif link:
+            link_str = str(link).strip()
+        else:
+            link_str = ""
+        value = f"б/н {link_str}" if link_str else "б/н"
 
     inp = find_input_near_label(driver, "Номер у корреспондента")
     if not inp:
@@ -316,9 +321,11 @@ def fill_corr_number(driver, link=None):
         log.warning(f"Номер: ошибка {e}")
 
 
-def fill_corr_date(driver):
-    """Заполняет 'Дата у корреспондента' = сегодня."""
-    today = date.today().strftime("%d.%m.%Y")
+def fill_corr_date(driver, override=None):
+    """Заполняет 'Дата у корреспондента'.
+    override (если задан) — использовать как есть (для ZHKH: реальная дата
+    получения обращения, формат DD.MM.YYYY). Иначе — сегодня."""
+    today = override.strip() if override else date.today().strftime("%d.%m.%Y")
     labels = driver.find_elements(By.XPATH,
         "//*[normalize-space(text())='Дата у корреспондента']")
     inp = None
@@ -854,8 +861,9 @@ def create_one_document(driver, doc_data, index, total):
     # [4/7] Заполнение формы
     fill_text(driver, doc_data["содержание"])
     fill_correspondent_field(driver, doc_data["корреспондент"])
-    fill_corr_number(driver, doc_data.get("link"))
-    fill_corr_date(driver)
+    fill_corr_number(driver, doc_data.get("link"),
+                      override=doc_data.get("номер_обращения"))
+    fill_corr_date(driver, override=doc_data.get("дата_обращения"))
 
     for addr in settings.get("addressees", cfg.DEFAULTS["addressees"]):
         add_addressee(driver, addr)
