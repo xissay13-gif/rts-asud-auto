@@ -267,9 +267,16 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         log.warning(f"okrug_parser упал для {os.path.basename(msg_path)}: {e}")
         okrug = None
 
+    # Для ZHKH-писем краткое содержание в АСУД = тема письма (subject),
+    # а не полный body (там длинный табличный текст с подписью).
+    if zhkh:
+        soderzhanie = clean_subject
+    else:
+        soderzhanie = body_clean
+
     return {
         "row_idx": 1,
-        "содержание": body_clean,
+        "содержание": soderzhanie,
         "корреспондент": correspondent,
         "корр_найден": corr_found,
         "корр_источник": fio_src,
