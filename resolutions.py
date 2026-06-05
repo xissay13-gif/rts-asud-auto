@@ -300,7 +300,7 @@ def load_excel(file_path):
     log.info(f"Заголовки: {header}")
 
     # Если это _резолюции.xlsx (есть колонка ОПТС/asud_id)
-    asud_keys = ('опт', 'орт', 'асуд', 'asud', 'регистрацион')
+    asud_keys = ('опт', 'орт', 'асуд', 'asud', 'регистрацион', 'номер')
     fio_keys = ('фио', 'исполнит')
     okrug_keys = ('округ', 'ао')
     link_keys = ('link', 'ссылк')
