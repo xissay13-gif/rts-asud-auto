@@ -391,15 +391,15 @@ def main():
 
     base_dir = cfg.get_base_dir()
 
-    # Запрос пути к папке с .msg
-    folder = os.environ.get('ASUD_EMAIL_FOLDER')
-    if not folder:
-        default = settings.get("email_folder", "")
-        print(f"\nПапка с .msg-письмами (только из корня папки, подпапки игнорируются).")
-        if default:
-            print(f"Enter — использовать: {default}")
-        user_dir = input("Путь: ").strip().strip('"').strip("'")
-        folder = user_dir or default
+    # Запрос пути к папке с .msg — спрашиваем всегда, даже при пресете.
+    # Дефолтом подставляется ASUD_EMAIL_FOLDER (от пресета) или email_folder из конфига.
+    default = os.environ.get('ASUD_EMAIL_FOLDER') \
+              or settings.get("email_folder", "")
+    print(f"\nПапка с .msg-письмами (только из корня папки, подпапки игнорируются).")
+    if default:
+        print(f"Enter — использовать: {default}")
+    user_dir = input("Путь: ").strip().strip('"').strip("'")
+    folder = user_dir or default
 
     if not folder or not os.path.isdir(folder):
         log.error(f"Папка не найдена: {folder!r}")
@@ -604,15 +604,14 @@ def daemon_main():
     log.info(f"Логика обработки: {process_mode}"
              + (f", суффикс реестра: {output_suffix}" if output_suffix else ""))
 
-    # Папка
-    folder = os.environ.get('ASUD_EMAIL_FOLDER')
-    if not folder:
-        default = settings.get("email_folder", "")
-        print(f"\nПапка с .msg-письмами для непрерывного мониторинга.")
-        if default:
-            print(f"Enter — использовать: {default}")
-        user_dir = input("Путь: ").strip().strip('"').strip("'")
-        folder = user_dir or default
+    # Папка — спрашиваем всегда, даже при пресете
+    default = os.environ.get('ASUD_EMAIL_FOLDER') \
+              or settings.get("email_folder", "")
+    print(f"\nПапка с .msg-письмами для непрерывного мониторинга.")
+    if default:
+        print(f"Enter — использовать: {default}")
+    user_dir = input("Путь: ").strip().strip('"').strip("'")
+    folder = user_dir or default
     if not folder or not os.path.isdir(folder):
         log.error(f"Папка не найдена: {folder!r}")
         input("Enter...")
