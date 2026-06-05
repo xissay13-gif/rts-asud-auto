@@ -31,6 +31,7 @@ from shared.okrug_parser import okrug_from_textbody
 from shared.attachments import move_to_done, move_to_errors, move_to_drafts
 from shared.colors import green, yellow, red, status_colored
 from shared.classifier import classify_doc_type
+from shared.zhkh_parser import parse_zhkh_body
 
 # Переиспользуем создание/регистрацию/output из mix
 from flows import mix as mix_flow
@@ -238,7 +239,18 @@ def _parse_one_msg(msg_path, process_mode="mix"):
                             str(subject).strip(), flags=re.IGNORECASE)
     body_clean = mix_flow._clean_body(body) if body else clean_subject
 
-    if force_draft:
+    # ГИС ЖКХ — спец-парсер табличного body. Если сработал, его данные
+    # перебивают force_draft и общий extract_fio_from_text.
+    zhkh = parse_zhkh_body(body)
+
+    if zhkh:
+        correspondent = zhkh['фио']
+        corr_found = True
+        fio_src = "zhkh"
+        force_draft = False  # ZHKH-парсер сам нашёл ФИО, draft не нужен
+        log.info(f"{os.path.basename(msg_path)}: ГИС ЖКХ → {zhkh['фио']}, "
+                 f"№{zhkh.get('номер_обращения')} от {zhkh.get('дата_обращения')}")
+    elif force_draft:
         # Smart + cat-0: принудительно черновик с фикс. корреспондентом
         # (чтобы письмо точно ушло в DRAFT-ветку mix.create_one_document).
         corr_found = False
@@ -269,6 +281,11 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         "округ_прогноз": okrug,
         "msg_date_prefix": _msg_date_prefix(msg_path),
         "force_draft": force_draft,
+        # ZHKH-специфичные поля (None если письмо не из ГИС ЖКХ).
+        # Дальше передадутся в mix.create_one_document для заполнения
+        # доп. полей АСУД-карточки.
+        "номер_обращения": zhkh.get('номер_обращения') if zhkh else None,
+        "дата_обращения":  zhkh.get('дата_обращения')  if zhkh else None,
     }
 
 
