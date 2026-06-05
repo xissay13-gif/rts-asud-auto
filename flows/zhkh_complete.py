@@ -44,7 +44,8 @@ def _read_asud_ids(xlsx_path):
 
 
 def complete_resolutions(driver, asud_ids=None, xlsx_path=None,
-                          switch_to="Басманов", switch_back_to=""):
+                          switch_to="Басманов", switch_back_to="",
+                          sidebar_section="На исполнение"):
     """Второй проход — массово жмёт 'Завершить' по списку.
 
     driver — уже залогиненная сессия (после email-flow)
@@ -53,6 +54,9 @@ def complete_resolutions(driver, asud_ids=None, xlsx_path=None,
     xlsx_path — путь к Registered/YYYY-MM-DD_ГИСЖКХ_резолюции.xlsx (fallback)
     switch_to — фрагмент ФИО учётки на которую переключаемся (Басманов А. В.)
     switch_back_to — фрагмент ФИО исходной учётки для возврата (пустая = не возвращать)
+    sidebar_section — название пункта sidebar после переключения. У Басманова
+                      документы лежат в 'На исполнение' (не 'На резолюцию' —
+                      это у того кто только что зарегистрировал и отправил).
     """
     if asud_ids is None:
         if not xlsx_path or not os.path.isfile(xlsx_path):
@@ -73,10 +77,11 @@ def complete_resolutions(driver, asud_ids=None, xlsx_path=None,
         log.error(f"Не удалось переключиться на {switch_to} — отмена второго прохода")
         return
 
-    # Sidebar → "На резолюцию"
-    if not click_sidebar_section(driver, "На резолюцию"):
-        log.error("Не удалось перейти в 'На резолюцию' — отмена")
-        switch_account(driver, switch_back_to)
+    # Sidebar → нужный раздел (у Басманова это 'На исполнение')
+    if not click_sidebar_section(driver, sidebar_section):
+        log.error(f"Не удалось перейти в '{sidebar_section}' — отмена")
+        if switch_back_to:
+            switch_account(driver, switch_back_to)
         return
 
     # Цикл по документам

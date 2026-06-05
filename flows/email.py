@@ -545,12 +545,15 @@ def main():
             from flows.zhkh_complete import complete_resolutions
             switch_to = settings.get("zhkh_complete_user", "Басманов")
             switch_back = settings.get("zhkh_initial_user", "")
+            sidebar = settings.get("zhkh_sidebar_section",
+                                    cfg.DEFAULTS["zhkh_sidebar_section"])
             print(f"\nВторой проход: переключаюсь на «{switch_to}», "
                   f"завершаю {len(registered_asud_ids)} документов...")
             try:
                 complete_resolutions(driver, asud_ids=registered_asud_ids,
                                      switch_to=switch_to,
-                                     switch_back_to=switch_back)
+                                     switch_back_to=switch_back,
+                                     sidebar_section=sidebar)
             except Exception as e:
                 log.error(f"ZHKH-второй проход упал: {e}")
 
