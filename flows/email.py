@@ -213,12 +213,18 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         log.warning(f"Пустое письмо {os.path.basename(msg_path)} — пропускаю")
         return None
 
-    # Тип документа: smart — через классификатор, mix — захардкодженный дефолт.
+    # ГИС ЖКХ — спец-парсер табличного body. Запускаем ДО классификатора —
+    # для ZHKH-писем тип всегда 8 (письма граждан), классификатор не трогаем.
+    zhkh = parse_zhkh_body(body)
+
     force_draft = False
-    if process_mode == "smart":
-        # Классификатор работает на ИСХОДНОМ body (до _clean_body) — так
-        # сохраняется точная реплика правил начальника и доступен From-header
-        # для fallback по домену.
+    if zhkh:
+        # ZHKH-письмо: тип 8 железно, классификатор скипаем
+        type_idx = 8
+        log.info(f"{os.path.basename(msg_path)}: ГИС ЖКХ → {zhkh['фио']}, "
+                 f"№{zhkh.get('номер_обращения')} от {zhkh.get('дата_обращения')}")
+    elif process_mode == "smart":
+        # Не ZHKH: для smart-режима пускаем общий классификатор
         type_idx = classify_doc_type(body)
         if type_idx == -1:
             log.warning(f"{os.path.basename(msg_path)}: помечено классификатором "
@@ -230,7 +236,7 @@ def _parse_one_msg(msg_path, process_mode="mix"):
             log.info(f"{os.path.basename(msg_path)}: тип не определился → 8, "
                      f"оставляю в черновике для ручной проверки")
     else:
-        # mix-режим: классификатор не трогаем, используется только в smart
+        # mix-режим без ZHKH: дефолтный тип из settings
         type_idx = settings.get("default_type_idx", 8)
     type_name = cfg.DOC_TYPE_MAP.get(
         type_idx, "Письма, заявления и жалобы граждан, акционеров")
@@ -239,17 +245,11 @@ def _parse_one_msg(msg_path, process_mode="mix"):
                             str(subject).strip(), flags=re.IGNORECASE)
     body_clean = mix_flow._clean_body(body) if body else clean_subject
 
-    # ГИС ЖКХ — спец-парсер табличного body. Если сработал, его данные
-    # перебивают force_draft и общий extract_fio_from_text.
-    zhkh = parse_zhkh_body(body)
-
     if zhkh:
         correspondent = zhkh['фио']
         corr_found = True
         fio_src = "zhkh"
-        force_draft = False  # ZHKH-парсер сам нашёл ФИО, draft не нужен
-        log.info(f"{os.path.basename(msg_path)}: ГИС ЖКХ → {zhkh['фио']}, "
-                 f"№{zhkh.get('номер_обращения')} от {zhkh.get('дата_обращения')}")
+        # ZHKH-парсер уже нашёл ФИО, force_draft гарантированно False
     elif force_draft:
         # Smart + cat-0: принудительно черновик с фикс. корреспондентом
         # (чтобы письмо точно ушло в DRAFT-ветку mix.create_one_document).
