@@ -384,14 +384,15 @@ def _attach_via_input(driver, file_path):
         # 5а. ВАЖНО: дождаться пока input.files реально содержит файл.
         # Без этого confirm-клик случается до того как upload дошёл, модалка
         # остаётся открытой, файл по факту не прикреплён.
+        # 25с (раньше было 10) — в новой версии АСУД иногда долго отрисовывается.
         try:
-            WebDriverWait(driver, 10, poll_frequency=0.1).until(
+            WebDriverWait(driver, 25, poll_frequency=0.1).until(
                 lambda d: d.execute_script(
                     "return arguments[0].files && arguments[0].files.length > 0;",
                     inp))
             log.debug("input.files подтверждён")
         except Exception:
-            log.warning("input.files пустой за 10s — upload скорее всего не дошёл")
+            log.warning("input.files пустой за 25s — upload скорее всего не дошёл")
             return False
 
         # Триггерим change на случай если автоматический dispatch не сработал
@@ -563,6 +564,26 @@ def attach_content(driver, file_path, max_attempts=3):
     try:
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
+                # Проверка: может быть первый attempt по факту УЖЕ прикрепил файл,
+                # просто input.files не отрисовался вовремя? Если confirm-кнопка
+                # SetContent/Send уже видна — значит АСУД принял файл, повторный
+                # _attach_via_input приведёт к ДУБЛИРОВАНИЮ вложения.
+                try:
+                    confirm_btns = driver.find_elements(By.CSS_SELECTOR,
+                        "[id*='SetContent'], [id*='Send'], [id*='Submit']")
+                    has_visible_confirm = any(
+                        b.is_displayed() and b.get_attribute('id')
+                        for b in confirm_btns)
+                    if has_visible_confirm:
+                        log.info(f"Перед попыткой {attempt}: confirm-кнопка уже видна — "
+                                 f"файл по факту приложен. Пропускаю _attach_via_input, "
+                                 f"иду на confirm.")
+                        if _wait_confirm_and_click(driver, timeout=20):
+                            return True
+                        # confirm не сработал — закрываем и пробуем сначала
+                        log.warning("confirm не сработал даже когда кнопка была видна — закрываю всё")
+                except Exception:
+                    pass
                 log.warning(f"Прикрепление: попытка {attempt}/{max_attempts}")
                 try:
                     close_open_modals(driver)
