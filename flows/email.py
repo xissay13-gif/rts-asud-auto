@@ -371,7 +371,7 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
     else:  # FAILED — caller сам решает что делать (retry / move-to-errors)
         pass
 
-    return status
+    return status, asud_id
 
 
 # ================= MAIN =================
@@ -469,15 +469,19 @@ def main():
         log.info(f"Per-date реестры в: {os.path.join(base_dir, 'Registered')}")
 
         done_count, dup_count, draft_count, err_count = 0, 0, 0, 0
+        # Для ZHKH-второго прохода: собираем АСУД-номера успешно зарегистрированных
+        registered_asud_ids = []
         for i, doc in enumerate(docs, 1):
             msg_path = doc.get("файл")
             try:
-                status = _process_doc(driver, doc, base_dir, folder,
+                status, asud_id = _process_doc(driver, doc, base_dir, folder,
                                        i, len(docs), in_daemon=False,
                                        process_mode=process_mode,
                                        output_suffix=output_suffix)
                 if status == "OK":
                     done_count += 1
+                    if asud_id:
+                        registered_asud_ids.append(asud_id)
                 elif status == "DUPLICATE":
                     dup_count += 1
                 elif status == "DRAFT":
@@ -527,6 +531,22 @@ def main():
         print(f"  Ошибок:       {red(str(err_count))}  (→ Ошибки/)")
         print(f"  Затрачено:    {elapsed}" + (f"  (в среднем {avg}/док)" if avg else ""))
         print("=" * 60)
+
+        # ZHKH-второй проход: переключиться на Басманова, нажать «Завершить»
+        # по каждому из только что зарегистрированных документов
+        if output_suffix == "ГИСЖКХ" and registered_asud_ids:
+            from flows.zhkh_complete import complete_resolutions
+            switch_to = settings.get("zhkh_complete_user", "Басманов")
+            switch_back = settings.get("zhkh_initial_user", "")
+            print(f"\nВторой проход: переключаюсь на «{switch_to}», "
+                  f"завершаю {len(registered_asud_ids)} документов...")
+            try:
+                complete_resolutions(driver, asud_ids=registered_asud_ids,
+                                     switch_to=switch_to,
+                                     switch_back_to=switch_back)
+            except Exception as e:
+                log.error(f"ZHKH-второй проход упал: {e}")
+
         input("\nEnter для закрытия...")
     except Exception as e:
         log.error(f"Ошибка: {e}")
@@ -654,7 +674,7 @@ def daemon_main():
                     continue
 
                 try:
-                    status = _process_doc(driver, doc, base_dir, folder,
+                    status, _asud_id = _process_doc(driver, doc, base_dir, folder,
                                            idx, len(queue), in_daemon=True,
                                            process_mode=process_mode,
                                            output_suffix=output_suffix)

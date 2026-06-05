@@ -41,10 +41,12 @@ jobs:
         --hidden-import=shared.colors
         --hidden-import=shared.classifier
         --hidden-import=shared.zhkh_parser
+        --hidden-import=shared.asud_resolution
         --hidden-import=flows.mix
         --hidden-import=flows.auto_create
         --hidden-import=flows.smart
         --hidden-import=flows.email
+        --hidden-import=flows.zhkh_complete
         app.py
 
     - name: Copy launchers + settings template
