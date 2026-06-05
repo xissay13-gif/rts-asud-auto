@@ -555,8 +555,8 @@ def set_stage_date_explicit(driver, deadline_str):
 
 
 def compute_control_date(planned_date_str, fallback_days=3):
-    """Парсит DD.MM.YYYY. Если дата в прошлом (< today) — возвращает
-    today + fallback_days КАЛЕНДАРНЫХ дней. Иначе — саму дату.
+    """Парсит DD.MM.YYYY. Если дата сегодня или в прошлом (<= today) —
+    возвращает today + fallback_days КАЛЕНДАРНЫХ дней. Иначе — саму дату.
     Возвращает строку DD.MM.YYYY готовую для js_set_value.
     """
     today = date.today()
@@ -565,11 +565,11 @@ def compute_control_date(planned_date_str, fallback_days=3):
             parts = planned_date_str.strip().split('.')
             if len(parts) == 3:
                 d = date(int(parts[2]), int(parts[1]), int(parts[0]))
-                if d >= today:
+                if d > today:
                     return d.strftime("%d.%m.%Y")
         except Exception:
             pass
-    # Просрочено / не распарсилось → today + N дней
+    # Просрочено / сегодня / не распарсилось → today + N дней
     return (today + timedelta(days=fallback_days)).strftime("%d.%m.%Y")
 
 
