@@ -84,13 +84,19 @@ def switch_account(driver, target_substring):
         return False
 
     # Шаг 2: клик по пункту со строкой target_substring
+    # Используем прямой XPath-search вместо predicate-обхода всех div/span/label
+    # (раньше ждали ~25 сек, теперь должны находить за пару секунд).
     try:
-        WebDriverWait(driver, 10).until(
-            lambda d: any(target_substring in (e.text or '')
-                          for e in d.find_elements(By.CSS_SELECTOR, "div, span, label")
-                          if e.is_displayed()))
+        WebDriverWait(driver, 5).until(
+            lambda d: any(
+                e.is_displayed() for e in d.find_elements(
+                    By.XPATH,
+                    f"//*[contains(normalize-space(text()), '{target_substring}')]"
+                )
+            )
+        )
     except Exception:
-        log.warning(f"Пункт '{target_substring}' в выпадашке не появился")
+        log.warning(f"Пункт '{target_substring}' в выпадашке не появился за 5с")
 
     items = driver.find_elements(By.XPATH,
         f"//*[contains(normalize-space(text()), '{target_substring}')]")
@@ -117,21 +123,26 @@ def switch_account(driver, target_substring):
     return True
 
 
-def wait_profile_loaded(driver, max_wait=120):
-    """Ждёт готовности АСУД после смены учётки: readyState + кнопка
-    'Создать документ' (индикатор главной). Таблицу с задачами не ждём."""
-    log.info("Жду готовности АСУД...")
+def wait_profile_loaded(driver, max_wait=60):
+    """Ждёт готовности АСУД после смены учётки: readyState + появление
+    sidebar-items (не главная кнопка — она у разных юзеров может различаться).
+    """
+    log.info("Жду готовности АСУД после смены учётки...")
     try:
         WebDriverWait(driver, max_wait).until(
             lambda d: d.execute_script("return document.readyState === 'complete'"))
     except Exception:
         log.warning("readyState не complete")
+    # Ждём sidebar (минимум 3 видимых <td> с текстом — это пункты меню)
     try:
         WebDriverWait(driver, max_wait).until(
-            EC.element_to_be_clickable((By.ID, "mainscreen-create-button")))
-        log.info("АСУД готов")
+            lambda d: sum(1 for el in d.find_elements(
+                By.XPATH, "//td[normalize-space(text())]"
+            ) if el.is_displayed()) >= 3
+        )
+        log.info("АСУД готов (sidebar отрисован)")
     except Exception:
-        log.warning("Кнопка 'Создать документ' не появилась — продолжаю")
+        log.warning(f"Sidebar не отрисовался за {max_wait}с — продолжаю")
 
 
 # ============================================================
@@ -139,20 +150,68 @@ def wait_profile_loaded(driver, max_wait=120):
 # ============================================================
 
 def click_sidebar_section(driver, section_text):
-    """Клик по пункту в левом сайдбаре по тексту."""
+    """Клик по пункту в левом сайдбаре. Пробует:
+      1) Точное совпадение по тексту
+      2) Несколько вариантов (с разными окончаниями)
+      3) Contains-совпадение (если предыдущие не нашли)
+    Подождёт до 15с пока пункт появится (sidebar может догружаться).
+    """
     log.info(f"Сайдбар → '{section_text}'")
-    items = driver.find_elements(By.XPATH,
-        f"//*[normalize-space(text())='{section_text}']")
+
+    # Варианты на случай небольших расхождений в названии
+    base = section_text.rstrip('еиюуяай')  # отрезаем окончание
+    variants = [section_text]
+    # Добавим близкие варианты с разными окончаниями
+    for suffix in ('', 'е', 'и', 'ю', 'у', 'я', 'й', 'а'):
+        v = base + suffix
+        if v and v not in variants:
+            variants.append(v)
+
     target = None
-    for it in items:
+    end = time.monotonic() + 15
+    while time.monotonic() < end and not target:
+        # Точные совпадения для каждой вариации
+        for v in variants:
+            try:
+                items = driver.find_elements(By.XPATH,
+                    f"//*[normalize-space(text())='{v}']")
+                for it in items:
+                    if it.is_displayed():
+                        target = it
+                        if v != section_text:
+                            log.info(f"  найден по варианту: '{v}'")
+                        break
+                if target:
+                    break
+            except Exception:
+                continue
+        if target:
+            break
+        # Fallback — contains-search
         try:
-            if it.is_displayed():
-                target = it
-                break
+            items = driver.find_elements(By.XPATH,
+                f"//td[contains(normalize-space(text()), '{section_text}')]")
+            for it in items:
+                if it.is_displayed():
+                    target = it
+                    log.info(f"  найден по contains: '{it.text!r}'")
+                    break
         except Exception:
-            continue
+            pass
+        if target:
+            break
+        time.sleep(0.5)
+
     if not target:
-        log.error(f"Пункт сайдбара '{section_text}' не найден")
+        # Лог: какие пункты вообще есть в sidebar для диагностики
+        try:
+            visible_items = [el.text.strip() for el in driver.find_elements(
+                By.XPATH, "//td[normalize-space(text())]")
+                if el.is_displayed() and (el.text or '').strip()]
+            log.error(f"Пункт сайдбара '{section_text}' не найден за 15с. "
+                      f"Видимые пункты: {visible_items[:30]}")
+        except Exception:
+            log.error(f"Пункт сайдбара '{section_text}' не найден")
         return False
     click(driver, target, f"сайдбар: {section_text}")
     try:
