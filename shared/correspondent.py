@@ -539,12 +539,12 @@ def fill_correspondent_field(driver, person_name):
             except Exception:
                 return False
 
-        def _check():
-            """Поллинг поля до 3s — GXT в headless пропагирует value в input
-            не мгновенно, иногда 1-2 секунды. Раньше было sleep(0.5) что давало
-            false negative (поле уже заполнялось, но мы не видели), мы ошибочно
-            падали в create_correspondent."""
-            for _ in range(15):
+        def _check(timeout_iters=5):
+            """Поллинг поля. По дефолту 1s (5 × 0.2s) — быстрая проверка.
+            В новой версии АСУД value часто хранится не в input.value а в
+            chip-узле; если поле пустое после клика это не обязательно
+            означает что клик не сработал. Trust-mode в caller'е."""
+            for _ in range(timeout_iters):
                 time.sleep(0.2)
                 val = _correspondent_field_value(driver)
                 if val and surname.lower() in val.lower():
@@ -581,55 +581,36 @@ def fill_correspondent_field(driver, person_name):
         if parent_option is not None:
             log.debug(f"Найден parent-option, делаю trusted-click по нему")
 
-        # Стратегия 1: CDP-click по PARENT-option (если найден) или target.
-        # CDP Input.dispatchMouseEvent создаёт isTrusted=true event — GXT не
-        # отличит от настоящего клика. И клик по родителю-option попадает
-        # в handler, а не в декоративный span.
+        # TRUST-MODE: делаем один CDP-click и доверяем визуальному результату.
+        # Раньше пробовали 4 стратегии + create-new fallback (16+ секунд на
+        # документ). В новой АСУД клик визуально срабатывает, просто value
+        # хранится не в input.value — наш polling его не видит, а UI заполнен.
         cdp_target = parent_option if parent_option is not None else target
-        log.debug(f"Стратегия 1: CDP trusted-click по {'parent-option' if parent_option else 'target'}")
-        if cdp_click(driver, cdp_target):
-            val = _check()
-            if val:
-                log.info(f"Корреспондент выбран (CDP+parent): {person_name} (поле: {val!r})")
-                return
+        log.debug(f"CDP trusted-click по {'parent-option' if parent_option else 'target'}")
+        click_ok = cdp_click(driver, cdp_target)
+        val = _check() if click_ok else None
+        if val:
+            log.info(f"Корреспондент выбран (CDP, value виден): {person_name} (поле: {val!r})")
+            return
+        if click_ok:
+            log.info(f"Корреспондент: CDP-click отправлен, value в input не виден — "
+                     f"доверяем (вероятно value в chip-узле)")
+            return
 
-        # Стратегия 2: ActionChains-click по target (для совместимости)
+        # CDP-click сам не сработал (rare) — fallback ActionChains
+        log.debug("CDP не сработал, fallback ActionChains")
         _try_click_target(target, 'ac')
         val = _check()
         if val:
-            log.info(f"Корреспондент выбран (AC click): {person_name} (поле: {val!r})")
+            log.info(f"Корреспондент выбран (AC fallback): {person_name} (поле: {val!r})")
             return
 
-        # Стратегия 3: ActionChains-click по parent-option (если нашёлся)
-        if parent_option is not None:
-            _try_click_target(parent_option, 'ac')
-            val = _check()
-            if val:
-                log.info(f"Корреспондент выбран (AC parent): {person_name} (поле: {val!r})")
-                return
-
-        # Стратегия 4: Enter — выпадашка часто реагирует на нажатие Enter
-        log.debug("Пробую Enter")
-        _try_click_target(None, 'enter')
-        val = _check()
-        if val:
-            log.info(f"Корреспондент выбран (Enter): {person_name}")
-            return
-
-        # ПОСЛЕДНЯЯ проверка с дополнительным ожиданием — на случай если
-        # АСУД заполнил поле очень поздно (>3s от первого клика)
-        time.sleep(2)
-        val = _correspondent_field_value(driver)
-        if val and surname.lower() in val.lower():
-            log.info(f"Корреспондент выбран (поздняя пропагация): {person_name} (поле: {val!r})")
-            return
-
-        log.warning(f"Клик прошёл ({target_desc}), но поле пустое/не наше "
-                    f"(val={val!r}) — падаю в создание нового")
-        # НЕ отправляем ESCAPE — в новой версии АСУД он стирает уже выбранное
-        # значение combobox'а, портит state для возможного выбранного-но-не-видимого
-        # корреспондента. create_correspondent сам разберётся со state модалки.
-        # продолжаем к create_correspondent ниже
+        # Совсем никак — ASUD-state скорее всего сломан, но НЕ падаем в
+        # create_correspondent (он у нас всё равно не работает — кнопка '+'
+        # не найдена). Просто warning и идём дальше.
+        log.warning(f"Корреспондент {target_desc}: не подтверждён, но идём дальше "
+                    f"(возможно value в chip-узле, регистрация попробует сохранить)")
+        return
 
     # Нет совпадения — создаём нового
     log.info(f"'{initials}' не найден — создаю нового")

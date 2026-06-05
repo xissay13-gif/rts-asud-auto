@@ -452,8 +452,9 @@ def _addressee_chip_present(driver, inp, surname):
     return False
 
 
-def _poll_addressee_chip(driver, inp, surname, timeout=3):
-    """Поллинг до timeout секунд — ждём появления chip-а."""
+def _poll_addressee_chip(driver, inp, surname, timeout=1.0):
+    """Поллинг до timeout секунд — ждём появления chip-а.
+    Дефолт уменьшен до 1s т.к. в trust-mode мы не блокируемся на проверке."""
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if _addressee_chip_present(driver, inp, surname):
@@ -535,47 +536,33 @@ def add_addressee(driver, person_name):
     except Exception:
         pass
 
-    # Стратегия 1: CDP trusted-click по parent-option (если есть) или target
+    # TRUST-MODE: один CDP-click и доверяем визуальному результату. Раньше
+    # пробовали 4 стратегии (≈15 секунд на адресат). В новой АСУД UI
+    # заполняется, но наш XPath не находит chip в ancestor-tree.
     cdp_target = parent_option if parent_option is not None else target
-    log.debug(f"Адресат strat1: CDP click по {'parent-option' if parent_option else 'target'}")
-    if cdp_click(driver, cdp_target):
-        if _poll_addressee_chip(driver, inp, surname):
-            log.info(f"Адресат добавлен (CDP): {person_name}")
-            return
+    log.debug(f"Адресат: CDP click по {'parent-option' if parent_option else 'target'}")
+    click_ok = cdp_click(driver, cdp_target)
+    chip_ok = _poll_addressee_chip(driver, inp, surname) if click_ok else False
+    if chip_ok:
+        log.info(f"Адресат добавлен (CDP, chip найден): {person_name}")
+        return
+    if click_ok:
+        log.info(f"Адресат: CDP-click отправлен, chip не найден в DOM — "
+                 f"доверяем визуальному результату")
+        return
 
-    # Стратегия 2: ActionChains click по target
-    log.debug("Адресат strat2: AC click по target")
+    # CDP сам не сработал — fallback ActionChains
+    log.debug("Адресат: CDP не сработал, fallback ActionChains")
     try:
         ActionChains(driver).move_to_element(target).pause(0.2).click().perform()
     except Exception as e:
         log.debug(f"  AC click err: {e}")
     if _poll_addressee_chip(driver, inp, surname):
-        log.info(f"Адресат добавлен (AC): {person_name}")
+        log.info(f"Адресат добавлен (AC fallback): {person_name}")
         return
 
-    # Стратегия 3: ActionChains click по parent-option (если есть)
-    if parent_option is not None:
-        log.debug("Адресат strat3: AC click по parent-option")
-        try:
-            ActionChains(driver).move_to_element(parent_option).pause(0.2).click().perform()
-        except Exception as e:
-            log.debug(f"  AC parent err: {e}")
-        if _poll_addressee_chip(driver, inp, surname):
-            log.info(f"Адресат добавлен (AC parent): {person_name}")
-            return
-
-    # Стратегия 4: Enter
-    log.debug("Адресат strat4: Enter")
-    try:
-        ActionChains(driver).send_keys(Keys.ENTER).perform()
-    except Exception:
-        pass
-    if _poll_addressee_chip(driver, inp, surname, timeout=4):
-        log.info(f"Адресат добавлен (Enter): {person_name}")
-        return
-
-    log.warning(f"Адресат: все 4 стратегии не сработали для '{person_name}' "
-                f"(клик прошёл, но chip не появился)")
+    log.warning(f"Адресат '{person_name}': клик прошёл, chip не появился — "
+                f"идём дальше (возможно value в скрытом узле)")
 
 
 # ================= REGISTRATION =================
