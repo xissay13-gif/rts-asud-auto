@@ -4,19 +4,20 @@ shared/asud_resolution.py — Хелперы для работы с раздел
 Перенесены из clean-resolutions ветки (resolutions.py). Используются для
 второго прохода после email-flow в ГИСЖКХ-пресете:
   switch_account → click_sidebar_section → для каждого doc:
-    filter_by_number → find_doc_row → open_doc_card → click_complete_button
-                                                    → close_card_after_complete
+    filter_by_number → find_doc_row → open_doc_card → выдача резолюции +
+    «Завершить» → close_card_after_complete
 """
 
 import time
 import logging
+from datetime import date, timedelta
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-from shared.ui import click
+from shared.ui import click, find_input_near_label, js_set_value, close_open_modals
 
 log = logging.getLogger("asud.resolution")
 
@@ -435,6 +436,328 @@ def open_doc_card(driver, row):
 
     log.warning("[open] ПРОВАЛ: все 4 стратегии не сработали")
     return False
+
+
+# ============================================================
+# Выдача резолюции — порт из clean-resolutions
+# ============================================================
+
+def click_create_resolution(driver, timeout=10):
+    """Клик 'Создать резолюцию' в открытой карточке. id=header-action-btn-add_resolution."""
+    try:
+        btn = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.ID, "header-action-btn-add_resolution")))
+        click(driver, btn, "Создать резолюцию")
+        # Ждём появления поля 'Содержание' (placeholder='Общие формулировки')
+        try:
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located((
+                By.CSS_SELECTOR, "input[placeholder='Общие формулировки']")))
+        except Exception:
+            log.debug("Поле 'Содержание' не появилось за 10s")
+        return True
+    except Exception as e:
+        log.error(f"Кнопка 'Создать резолюцию' не найдена: {e}")
+        return False
+
+
+def select_content_template(driver, template_text):
+    """Выбирает в поле 'Содержание' пункт из выпадашки."""
+    try:
+        inp = None
+        candidates = driver.find_elements(By.CSS_SELECTOR,
+            "input[placeholder='Общие формулировки']")
+        for c in candidates:
+            if c.is_displayed():
+                inp = c
+                break
+        if not inp:
+            inp = find_input_near_label(driver, "Содержание")
+        if not inp:
+            log.error("Поле 'Содержание' не найдено")
+            return False
+
+        click(driver, inp, "Содержание")
+        try:
+            WebDriverWait(driver, 5).until(
+                lambda d: any(it.is_displayed() for it in d.find_elements(
+                    By.XPATH, f"//*[normalize-space(text())='{template_text}']")))
+        except Exception:
+            log.debug("Дропдаун 'Содержание' не появился за 5s")
+        items = driver.find_elements(By.XPATH,
+            f"//*[normalize-space(text())='{template_text}']")
+        target = None
+        for it in items:
+            try:
+                if it.is_displayed():
+                    target = it
+                    break
+            except Exception:
+                continue
+        if not target:
+            log.error(f"Пункт '{template_text}' в выпадашке не найден")
+            return False
+        click(driver, target, f"Содержание: {template_text}")
+        time.sleep(0.5)
+        return True
+    except Exception as e:
+        log.error(f"Ошибка выбора содержания: {e}")
+        return False
+
+
+def _wait_data_value(driver, container, target_value="true", timeout=5):
+    """Ждёт пока у контейнера-тоггла data-value станет target_value."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            if container.get_attribute('data-value') == target_value:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return False
+
+
+def toggle_switch(driver, label_text, target_value="true"):
+    """Переключает тоггл рядом с label_text в нужное состояние."""
+    try:
+        label = driver.find_element(By.XPATH,
+            f"//*[normalize-space(text())='{label_text}']")
+        container = label.find_element(By.XPATH,
+            "./following::*[contains(@class,'switcherContainer')][1]")
+    except Exception as e:
+        log.warning(f"Тоггл '{label_text}' не найден: {e}")
+        return False
+
+    cur = container.get_attribute('data-value')
+    if cur == target_value:
+        log.info(f"Тоггл '{label_text}' уже = {target_value}")
+        return True
+
+    click(driver, container, f"тоггл {label_text} → {target_value}")
+    if _wait_data_value(driver, container, target_value, timeout=3):
+        log.info(f"Тоггл '{label_text}' = {target_value}")
+        return True
+    log.warning(f"Тоггл '{label_text}' не переключился")
+    return False
+
+
+def set_stage_date_explicit(driver, deadline_str):
+    """Заполняет дату в поле 'Контрольный этап' = deadline_str (формат DD.MM.YYYY)."""
+    try:
+        inp = driver.find_element(By.CSS_SELECTOR,
+            "input[id*='stage_control_date']")
+        js_set_value(driver, inp, deadline_str)
+        log.info(f"Контрольный этап: {deadline_str}")
+        return True
+    except Exception as e:
+        log.warning(f"Поле даты этапа не найдено: {e}")
+        return False
+
+
+def compute_control_date(planned_date_str, fallback_days=3):
+    """Парсит DD.MM.YYYY. Если дата в прошлом (< today) — возвращает
+    today + fallback_days КАЛЕНДАРНЫХ дней. Иначе — саму дату.
+    Возвращает строку DD.MM.YYYY готовую для js_set_value.
+    """
+    today = date.today()
+    if planned_date_str:
+        try:
+            parts = planned_date_str.strip().split('.')
+            if len(parts) == 3:
+                d = date(int(parts[2]), int(parts[1]), int(parts[0]))
+                if d >= today:
+                    return d.strftime("%d.%m.%Y")
+        except Exception:
+            pass
+    # Просрочено / не распарсилось → today + N дней
+    return (today + timedelta(days=fallback_days)).strftime("%d.%m.%Y")
+
+
+def fill_executor(driver, fio):
+    """Вбивает ФИО в поле 'Исполнитель' (combobox), выбирает из выпадашки."""
+    from shared.correspondent import match_correspondent
+    try:
+        inp = find_input_near_label(driver, "Исполнитель")
+        if not inp:
+            inp = driver.find_element(By.ID, "select_combobox-input")
+        if not inp:
+            log.error("Поле 'Исполнитель' не найдено")
+            return False
+
+        surname = fio.split()[0]
+        inp.click()
+        try:
+            inp.clear()
+        except Exception:
+            pass
+        for ch in surname:
+            inp.send_keys(ch)
+        log.info(f"Введена фамилия исполнителя: {surname}")
+
+        def _candidates():
+            results = driver.find_elements(By.XPATH,
+                f"//*[contains(text(),'{surname}')]")
+            return [r for r in results
+                    if r.is_displayed() and r != inp
+                    and r.tag_name.lower() != 'input']
+
+        candidates = []
+        try:
+            WebDriverWait(driver, 5).until(lambda d: len(_candidates()) > 0)
+            candidates = _candidates()
+        except Exception:
+            try:
+                inp.send_keys(Keys.ENTER)
+                WebDriverWait(driver, 3).until(lambda d: len(_candidates()) > 0)
+                candidates = _candidates()
+            except Exception:
+                pass
+
+        log.info(f"Кандидатов: {len(candidates)}")
+        target = None
+        for idx, r in enumerate(candidates, 1):
+            try:
+                txt = (r.text or '').strip()
+                if len(txt) > 200:
+                    continue
+                ok = match_correspondent(txt, fio)
+                preview = txt.replace('\n', ' ')[:80]
+                log.info(f"  [{idx}] {'OK' if ok else '--'} | {preview!r}")
+                if ok and target is None:
+                    target = r
+            except Exception:
+                continue
+
+        if not target:
+            log.error(f"Исполнитель '{fio}' не найден в выпадашке")
+            return False
+
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", target)
+        ActionChains(driver).move_to_element(target).pause(0.2).click().perform()
+        log.info(f"Исполнитель выбран: {fio}")
+        return True
+    except Exception as e:
+        log.error(f"Ошибка ввода исполнителя: {e}")
+        return False
+
+
+def wait_button_enabled(driver, btn_id, timeout=15):
+    """Ждёт пока кнопка с data-disabled='1' не станет активной."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            btn = driver.find_element(By.ID, btn_id)
+            if btn.get_attribute('data-disabled') != '1' and btn.is_displayed():
+                return btn
+        except Exception:
+            pass
+        time.sleep(0.3)
+    return None
+
+
+def click_confirm_yes(driver, timeout=10):
+    """Ждёт и кликает 'Да' в confirm-диалоге АСУД (с fallback'ами)."""
+    yes_btn = None
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            btn = driver.find_element(By.ID, "confirm_dialog_btn_yes")
+            if btn.is_displayed():
+                yes_btn = btn
+                break
+        except Exception:
+            pass
+        try:
+            btn = driver.find_element(By.CSS_SELECTOR,
+                "[id*='confirm_dialog_btn_yes'], [id*='confirm'][id*='yes']")
+            if btn.is_displayed():
+                yes_btn = btn
+                break
+        except Exception:
+            pass
+        try:
+            for b in driver.find_elements(By.XPATH,
+                    "//*[normalize-space(text())='Да']"):
+                if b.is_displayed():
+                    yes_btn = b
+                    break
+        except Exception:
+            pass
+        if yes_btn:
+            break
+        time.sleep(0.5)
+    if not yes_btn:
+        log.warning("Confirm-диалог 'Да' не появился")
+        return False
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", yes_btn)
+        time.sleep(0.3)
+    except Exception:
+        pass
+    clicked = False
+    try:
+        ActionChains(driver).move_to_element(yes_btn).pause(0.3).click().perform()
+        log.info(f"Клик 'Да' (ActionChains)")
+        clicked = True
+    except Exception:
+        pass
+    if not clicked:
+        try:
+            driver.execute_script("arguments[0].click();", yes_btn)
+            log.info("Клик 'Да' (JS)")
+            clicked = True
+        except Exception:
+            pass
+    if not clicked:
+        try:
+            yes_btn.click()
+            log.info("Клик 'Да' (native)")
+            clicked = True
+        except Exception:
+            pass
+    if clicked:
+        try:
+            ActionChains(driver).send_keys(Keys.ENTER).perform()
+        except Exception:
+            pass
+        try:
+            WebDriverWait(driver, 5).until_not(EC.visibility_of(yes_btn))
+        except Exception:
+            pass
+    return clicked
+
+
+def click_add_btn(driver, timeout=10):
+    """Клик 'Добавить' (id=add_btn) после fill_executor."""
+    btn = wait_button_enabled(driver, "add_btn", timeout=timeout)
+    if not btn:
+        log.error("Кнопка 'Добавить' не активировалась")
+        return False
+    click(driver, btn, "Добавить")
+    return True
+
+
+def submit_resolution(driver):
+    """Финальный шаг резолюции: 'Сохранить и отправить' → confirm 'Да'."""
+    log.debug("[submit] жду активации 'Сохранить и отправить' (id=save_and_send_btn)")
+    btn = wait_button_enabled(driver, "save_and_send_btn", timeout=15)
+    if not btn:
+        log.error("Кнопка 'Сохранить и отправить' не активировалась")
+        return False
+    log.info("[submit] клик 'Сохранить и отправить'")
+    click(driver, btn, "Сохранить и отправить")
+    log.info("[submit] жду confirm-диалог 'Да'")
+    confirmed = click_confirm_yes(driver, timeout=10)
+    log.info(f"[submit] confirm 'Да': {'OK' if confirmed else 'не появился'}")
+    # Ждём пока модалка 'Корневая резолюция' закроется
+    try:
+        WebDriverWait(driver, 5).until_not(
+            lambda d: any(t.is_displayed() for t in d.find_elements(
+                By.XPATH, "//*[contains(text(),'Корневая резолюция')]")))
+    except Exception:
+        log.warning("[submit] модалка 'Корневая резолюция' ещё открыта")
+        close_open_modals(driver)
+    return True
 
 
 # ============================================================

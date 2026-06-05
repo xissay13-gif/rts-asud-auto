@@ -291,8 +291,9 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         # ZHKH-специфичные поля (None если письмо не из ГИС ЖКХ).
         # Дальше передадутся в mix.create_one_document для заполнения
         # доп. полей АСУД-карточки.
-        "номер_обращения": zhkh.get('номер_обращения') if zhkh else None,
-        "дата_обращения":  zhkh.get('дата_обращения')  if zhkh else None,
+        "номер_обращения":  zhkh.get('номер_обращения')  if zhkh else None,
+        "дата_обращения":   zhkh.get('дата_обращения')   if zhkh else None,
+        "планируемая_дата": zhkh.get('планируемая_дата') if zhkh else None,
     }
 
 
@@ -476,8 +477,8 @@ def main():
         log.info(f"Per-date реестры в: {os.path.join(base_dir, 'Registered')}")
 
         done_count, dup_count, draft_count, err_count = 0, 0, 0, 0
-        # Для ZHKH-второго прохода: собираем АСУД-номера успешно зарегистрированных
-        registered_asud_ids = []
+        # Для ZHKH-второго прохода: собираем dict'ы с asud_id + planned_date
+        registered_docs = []
         for i, doc in enumerate(docs, 1):
             msg_path = doc.get("файл")
             try:
@@ -488,7 +489,10 @@ def main():
                 if status == "OK":
                     done_count += 1
                     if asud_id:
-                        registered_asud_ids.append(asud_id)
+                        registered_docs.append({
+                            'asud_id': asud_id,
+                            'planned_date': doc.get('планируемая_дата'),
+                        })
                 elif status == "DUPLICATE":
                     dup_count += 1
                 elif status == "DRAFT":
@@ -541,19 +545,34 @@ def main():
 
         # ZHKH-второй проход: переключиться на Басманова, нажать «Завершить»
         # по каждому из только что зарегистрированных документов
-        if output_suffix == "ГИСЖКХ" and registered_asud_ids:
+        if output_suffix == "ГИСЖКХ" and registered_docs:
             from flows.zhkh_complete import complete_resolutions
-            switch_to = settings.get("zhkh_complete_user", "Басманов")
-            switch_back = settings.get("zhkh_initial_user", "")
-            sidebar = settings.get("zhkh_sidebar_section",
-                                    cfg.DEFAULTS["zhkh_sidebar_section"])
+            switch_to    = settings.get("zhkh_complete_user", "Басманов")
+            switch_back  = settings.get("zhkh_initial_user", "")
+            sidebar      = settings.get("zhkh_sidebar_section",
+                                         cfg.DEFAULTS["zhkh_sidebar_section"])
+            executor     = settings.get("zhkh_executor_fio",
+                                         cfg.DEFAULTS["zhkh_executor_fio"])
+            content_tpl  = settings.get("zhkh_content_template",
+                                         cfg.DEFAULTS["zhkh_content_template"])
+            req_report   = settings.get("zhkh_require_report",
+                                         cfg.DEFAULTS["zhkh_require_report"])
+            ctrl_res     = settings.get("zhkh_control_resolution",
+                                         cfg.DEFAULTS["zhkh_control_resolution"])
+            fb_days      = settings.get("zhkh_fallback_days",
+                                         cfg.DEFAULTS["zhkh_fallback_days"])
             print(f"\nВторой проход: переключаюсь на «{switch_to}», "
-                  f"завершаю {len(registered_asud_ids)} документов...")
+                  f"выдаю резолюции для {len(registered_docs)} документов...")
             try:
-                complete_resolutions(driver, asud_ids=registered_asud_ids,
+                complete_resolutions(driver, docs=registered_docs,
                                      switch_to=switch_to,
                                      switch_back_to=switch_back,
-                                     sidebar_section=sidebar)
+                                     sidebar_section=sidebar,
+                                     executor_fio=executor,
+                                     content_template=content_tpl,
+                                     require_report=req_report,
+                                     control_resolution=ctrl_res,
+                                     fallback_days=fb_days)
             except Exception as e:
                 log.error(f"ZHKH-второй проход упал: {e}")
 
