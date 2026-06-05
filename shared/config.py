@@ -50,6 +50,12 @@ DEFAULTS = {
             "folder": "D:\\OutlookSubjects\\ТЭС",
             "output_suffix": "ТЭС",
         },
+        {
+            "name": "ГИС ЖКХ — Mix (с регистрацией)",
+            "mode": "mix",
+            "folder": "D:\\OutlookSubjects\\ГИСЖКХ",
+            "output_suffix": "ГИСЖКХ",
+        },
     ],
 }
 
