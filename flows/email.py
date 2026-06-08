@@ -57,7 +57,11 @@ def _fix_mojibake(s):
     Triggers (все вместе):
       - 3+ символов из диапазона U+00C0..U+00FF (Latin-1 «cyrillic-looking»)
       - реальной кириллицы (U+0400..U+04FF) меньше чем «бракованных»
-      - после re-encode latin-1 → cp1251 реальная кириллица занимает ≥30%
+      - после re-encode latin-1 → cp1251 ≥80% бракованных символов
+        стали кириллицей (раньше сравнивали с len(candidate)//3 — ломалось
+        на строках с большим количеством ASCII: «55-2026-33646 24-я Северная,
+        д. 168, к. 1 до 14.06» — 13 кириллических из 50 символов, порог 16,
+        не проходило, кракозябры оставались)
     Иначе возвращаем строку как есть.
     """
     if not s or not isinstance(s, str):
@@ -71,7 +75,10 @@ def _fix_mojibake(s):
     try:
         candidate = s.encode('latin-1').decode('cp1251')
         new_cyr = sum(1 for c in candidate if 0x0400 <= ord(c) <= 0x04FF)
-        if new_cyr >= len(candidate) // 3:
+        # 0xC0-0xFF в CP1251 — вся кириллица. True mojibake → каждый bad
+        # становится кириллической буквой. Допуск 80% — на случай если
+        # пара байт оказалась знаком/латиницей.
+        if new_cyr >= bad * 0.8:
             return candidate
     except Exception:
         pass
