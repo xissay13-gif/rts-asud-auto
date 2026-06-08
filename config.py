@@ -14,9 +14,6 @@ log = logging.getLogger("asud.config")
 DEFAULTS = {
     "asud_url": "https://asud.interrao.ru/asudik/",
     "timeout": 20,
-    # DevTools attach (как в combo) — если Edge запущен с --remote-debugging-port,
-    # скрипт подхватит окно. Иначе fallback на свежий запуск.
-    "debugger_port": 9222,
     # Учётка под которой работает Халецкая (на которую переключаемся при старте).
     # Поиск пункта в выпадашке профиля по подстроке этого ФИО.
     "target_account": "Халецкая",

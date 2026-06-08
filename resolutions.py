@@ -1403,15 +1403,6 @@ def _choose_xlsx(base_dir):
         sys.exit(1)
 
 
-def _is_port_open(host, port, timeout=0.5):
-    import socket
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except (socket.error, OSError):
-        return False
-
-
 def _start_browser(base_dir):
     driver_path = os.path.join(base_dir, "msedgedriver.exe")
     if not os.path.exists(driver_path):
@@ -1420,28 +1411,13 @@ def _start_browser(base_dir):
         sys.exit(1)
 
     service = EdgeService(executable_path=driver_path)
-    debugger_port = settings.get("debugger_port")
-    if debugger_port and _is_port_open("127.0.0.1", int(debugger_port)):
-        try:
-            options = EdgeOptions()
-            options.add_experimental_option("debuggerAddress",
-                f"127.0.0.1:{debugger_port}")
-            driver = webdriver.Edge(service=service, options=options)
-            log.info(f"Подключился к открытому Edge на :{debugger_port} "
-                     f"(URL: {driver.current_url or '?'})")
-            return driver, True
-        except Exception as e:
-            log.warning(f"Не удалось подключиться: {e}")
-    elif debugger_port:
-        log.info(f"Edge не запущен с debug-портом {debugger_port}. Стартую новый.")
-
     options = EdgeOptions()
     options.add_argument("--start-maximized")
     options.add_argument("--auth-server-whitelist=*.interrao.ru")
     options.add_argument("--auth-negotiate-delegate-whitelist=*.interrao.ru")
     options.add_argument("--log-level=3")
     options.add_experimental_option('excludeSwitches', ['enable-logging'])
-    return webdriver.Edge(service=service, options=options), False
+    return webdriver.Edge(service=service, options=options)
 
 
 def _wait_profile_loaded(driver, max_wait=120):
@@ -1463,28 +1439,18 @@ def _wait_profile_loaded(driver, max_wait=120):
         log.warning("Кнопка 'Создать документ' не появилась — продолжаю")
 
 
-def _go_to_asud(driver, url, attached):
-    try:
-        cur = (driver.current_url or "").lower()
-    except Exception:
-        cur = ""
-    if attached and "asudik" in cur:
-        log.info(f"Использую вкладку АСУД: {driver.current_url}")
-    else:
-        log.info(f"Открываю {url}")
-        driver.get(url)
+def _go_to_asud(driver, url):
+    log.info(f"Открываю {url}")
+    driver.get(url)
     _wait_profile_loaded(driver)
 
 
-def _maybe_quit(driver, attached):
-    if attached:
-        log.info("Оставляю Edge открытым")
-    else:
-        try:
-            driver.quit()
-            log.info("Браузер закрыт")
-        except Exception as e:
-            log.warning(f"Ошибка закрытия: {e}")
+def _quit_browser(driver):
+    try:
+        driver.quit()
+        log.info("Браузер закрыт")
+    except Exception as e:
+        log.warning(f"Ошибка закрытия: {e}")
 
 
 def main():
@@ -1567,10 +1533,10 @@ def main():
         print("Отменено.")
         sys.exit(0)
 
-    driver, attached = _start_browser(base_dir)
+    driver = _start_browser(base_dir)
     try:
         url = settings.get("asud_url", cfg.DEFAULTS["asud_url"])
-        _go_to_asud(driver, url, attached)
+        _go_to_asud(driver, url)
 
         # Переключение учётки
         if not switch_account(driver,
@@ -1674,7 +1640,7 @@ def main():
         log.error(f"Ошибка: {e}")
         input("Enter...")
     finally:
-        _maybe_quit(driver, attached)
+        _quit_browser(driver)
         cfg.keep_system_awake(False)
 
 
