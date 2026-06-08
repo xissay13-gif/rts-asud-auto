@@ -403,27 +403,38 @@ def load_excel(file_path):
 # UI: переключение учётки
 # ============================================================
 
-def _account_active(driver, target_substring):
+def _account_active(driver, target_substring, timeout=0):
     """Проверяет, что в шапке страницы (y < 80, обычно строка пользователя
-    лежит вверху слева) виден элемент с target_substring. Используется и
-    для early-return (уже под нужной учёткой), и для пост-верификации
-    после переключения.
+    лежит вверху слева) виден элемент с target_substring.
+
+    timeout > 0 — поллит каждые 0.5с пока шапка не отрендерится. Это важно
+    при первом запуске: под Edge 148 АСУД иногда рендерит ФИО пользователя
+    через 5-8с после _wait_profile_loaded. Без ожидания _account_active
+    отдаст False, и прога подумает что надо переключаться (а в шапке
+    уже та учётка что нужна).
     """
-    try:
-        elems = driver.find_elements(By.XPATH,
-            f"//*[contains(normalize-space(text()), '{target_substring}')]")
-        for e in elems:
-            try:
-                if not e.is_displayed():
+    end = time.monotonic() + max(timeout, 0)
+    first_pass = True
+    while first_pass or time.monotonic() < end:
+        first_pass = False
+        try:
+            elems = driver.find_elements(By.XPATH,
+                f"//*[contains(normalize-space(text()), '{target_substring}')]")
+            for e in elems:
+                try:
+                    if not e.is_displayed():
+                        continue
+                    rect = e.rect
+                    # Шапка: y < 80. Низ страницы / контент это y > 100.
+                    if rect.get('y', 1000) < 80:
+                        return True
+                except Exception:
                     continue
-                rect = e.rect
-                # Шапка: y < 80. Низ страницы / контент это y > 100.
-                if rect.get('y', 1000) < 80:
-                    return True
-            except Exception:
-                continue
-    except Exception:
-        pass
+        except Exception:
+            pass
+        if time.monotonic() >= end:
+            break
+        time.sleep(0.5)
     return False
 
 
@@ -436,8 +447,11 @@ def switch_account(driver, target_substring):
     """
     log.info(f"Переключение на учётку: {target_substring}")
 
-    # Early return: уже под нужной учёткой
-    if _account_active(driver, target_substring):
+    # Early return: уже под нужной учёткой.
+    # timeout=10 — даём шапке время отрендериться (под Edge 148 это до 8с
+    # после _wait_profile_loaded). Раньше проверка была мгновенная и
+    # промахивалась если ФИО ещё не появилось в DOM.
+    if _account_active(driver, target_substring, timeout=10):
         log.info(f"Уже под учёткой '{target_substring}' — пропускаю переключение")
         return True
 
