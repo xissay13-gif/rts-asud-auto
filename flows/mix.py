@@ -288,15 +288,31 @@ def load_excel(file_path):
 # ================= FORM FILLING =================
 
 def fill_text(driver, text):
-    """Заполняет краткое содержание (textarea) — JS-set, plain-поле."""
+    """Заполняет краткое содержание (textarea) — JS-set.
+
+    Приоритет: textarea внутри #asudik-form-description (стабильный id из дампа).
+    Fallback: первая видимая textarea на странице.
+    """
     try:
-        areas = driver.find_elements(By.TAG_NAME, "textarea")
-        visible = [a for a in areas if a.is_displayed()]
-        if visible:
-            js_set_value(driver, visible[0], text)
+        area = None
+        try:
+            container = driver.find_element(By.ID, "asudik-form-description")
+            cands = container.find_elements(By.TAG_NAME, "textarea")
+            for c in cands:
+                if c.is_displayed():
+                    area = c
+                    break
+        except Exception:
+            pass
+        if not area:
+            areas = driver.find_elements(By.TAG_NAME, "textarea")
+            visible = [a for a in areas if a.is_displayed()]
+            area = visible[0] if visible else None
+        if area:
+            js_set_value(driver, area, text)
             log.info("Краткое содержание заполнено (JS)")
         else:
-            log.warning("Textarea не найдена")
+            log.warning("Textarea для краткого содержания не найдена")
     except Exception as e:
         log.error(f"Ошибка заполнения содержания: {e}")
 
@@ -316,7 +332,19 @@ def fill_corr_number(driver, link=None, override=None):
             link_str = ""
         value = f"б/н {link_str}" if link_str else "б/н"
 
-    inp = find_input_near_label(driver, "Номер у корреспондента")
+    # Приоритет — стабильный id #IncomingView-crspRegNumber (по дампу).
+    inp = None
+    try:
+        container = driver.find_element(By.ID, "IncomingView-crspRegNumber")
+        cands = container.find_elements(By.CSS_SELECTOR, "input[type='text']")
+        for c in cands:
+            if c.is_displayed():
+                inp = c
+                break
+    except Exception:
+        pass
+    if not inp:
+        inp = find_input_near_label(driver, "Номер у корреспондента")
     if not inp:
         log.warning("Поле 'Номер у корреспондента' не найдено")
         return
@@ -331,29 +359,43 @@ def fill_corr_number(driver, link=None, override=None):
 def fill_corr_date(driver, override=None):
     """Заполняет 'Дата у корреспондента'.
     override (если задан) — использовать как есть (для ZHKH: реальная дата
-    получения обращения, формат DD.MM.YYYY). Иначе — сегодня."""
+    получения обращения, формат DD.MM.YYYY). Иначе — сегодня.
+
+    Приоритет — стабильный id #IncomingView-crspRegDate (по дампу).
+    Fallback — поиск по label-text + parent-walk.
+    """
     today = override.strip() if override else date.today().strftime("%d.%m.%Y")
-    labels = driver.find_elements(By.XPATH,
-        "//*[normalize-space(text())='Дата у корреспондента']")
     inp = None
-    for label in labels:
-        try:
-            if not label.is_displayed():
-                continue
-            for level in range(1, 6):
-                parent = label
-                for _ in range(level):
-                    parent = parent.find_element(By.XPATH, "..")
-                inputs = parent.find_elements(By.CSS_SELECTOR, "input[type='text']")
-                visible = [i for i in inputs
-                           if i.is_displayed() and i.get_attribute("readonly") is None]
-                if visible:
-                    inp = visible[0]
-                    break
-            if inp:
+    try:
+        container = driver.find_element(By.ID, "IncomingView-crspRegDate")
+        cands = container.find_elements(By.CSS_SELECTOR, "input")
+        for c in cands:
+            if c.is_displayed() and c.get_attribute("readonly") is None:
+                inp = c
                 break
-        except Exception:
-            continue
+    except Exception:
+        pass
+    if not inp:
+        labels = driver.find_elements(By.XPATH,
+            "//*[normalize-space(text())='Дата у корреспондента']")
+        for label in labels:
+            try:
+                if not label.is_displayed():
+                    continue
+                for level in range(1, 6):
+                    parent = label
+                    for _ in range(level):
+                        parent = parent.find_element(By.XPATH, "..")
+                    inputs = parent.find_elements(By.CSS_SELECTOR, "input[type='text']")
+                    visible = [i for i in inputs
+                               if i.is_displayed() and i.get_attribute("readonly") is None]
+                    if visible:
+                        inp = visible[0]
+                        break
+                if inp:
+                    break
+            except Exception:
+                continue
 
     if not inp:
         log.warning("Поле 'Дата у корреспондента' не найдено")
@@ -367,40 +409,64 @@ def fill_corr_date(driver, override=None):
 
 
 def fill_delivery_method(driver):
-    """Выбирает 'Электронная почта' в 'Способ получения'."""
+    """Выбирает 'Электронная почта' в 'Способ получения'.
+
+    Приоритет — стабильный id #IncomingView-deliveryType (по дампу).
+    Fallback — поиск по label.
+    """
     target_text = settings.get("delivery_method", "Электронная почта")
-    labels = driver.find_elements(By.XPATH,
-        "//*[normalize-space(text())='Способ получения']")
     trigger = None
-    for label in labels:
-        try:
-            if not label.is_displayed():
-                continue
-            for level in range(1, 8):
-                parent = label
-                for _ in range(level):
-                    parent = parent.find_element(By.XPATH, "..")
-                inputs = parent.find_elements(By.CSS_SELECTOR, "input[type='text']")
-                for i in inputs:
-                    if i.is_displayed():
-                        trigger = i
+    try:
+        container = driver.find_element(By.ID, "IncomingView-deliveryType")
+        cands = container.find_elements(By.CSS_SELECTOR, "input")
+        for c in cands:
+            if c.is_displayed():
+                trigger = c
+                break
+        if not trigger:
+            for sel in ["div[class*='trigger']", "img[class*='trigger']"]:
+                try:
+                    el = container.find_element(By.CSS_SELECTOR, sel)
+                    if el.is_displayed():
+                        trigger = el
+                        break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    if not trigger:
+        labels = driver.find_elements(By.XPATH,
+            "//*[normalize-space(text())='Способ получения']")
+        for label in labels:
+            try:
+                if not label.is_displayed():
+                    continue
+                for level in range(1, 8):
+                    parent = label
+                    for _ in range(level):
+                        parent = parent.find_element(By.XPATH, "..")
+                    inputs = parent.find_elements(By.CSS_SELECTOR, "input[type='text']")
+                    for i in inputs:
+                        if i.is_displayed():
+                            trigger = i
+                            break
+                    if trigger:
+                        break
+                    for sel in ["div[class*='trigger']", "img[class*='trigger']"]:
+                        try:
+                            el = parent.find_element(By.CSS_SELECTOR, sel)
+                            if el.is_displayed():
+                                trigger = el
+                                break
+                        except Exception:
+                            continue
+                    if trigger:
                         break
                 if trigger:
                     break
-                for sel in ["div[class*='trigger']", "img[class*='trigger']"]:
-                    try:
-                        el = parent.find_element(By.CSS_SELECTOR, sel)
-                        if el.is_displayed():
-                            trigger = el
-                            break
-                    except Exception:
-                        continue
-                if trigger:
-                    break
-            if trigger:
-                break
-        except Exception:
-            continue
+            except Exception:
+                continue
 
     if not trigger:
         log.warning("Поле 'Способ получения' не найдено")
@@ -474,11 +540,25 @@ def add_addressee(driver, person_name):
     """Добавляет одного адресата через combobox.
     Multi-strategy click + проверка появления chip — GXT не всегда
     пропагирует value сразу после ActionChains.click.
+
+    Приоритет input'а: внутри #addressee_grid_id (стабильный id).
+    Fallback: поиск по label «Адресаты».
     """
     from shared.ui import cdp_click
-    inp = find_input_near_label(driver, "Адресаты")
+    inp = None
+    try:
+        grid = driver.find_element(By.ID, "addressee_grid_id")
+        cands = grid.find_elements(By.CSS_SELECTOR, "input")
+        for c in cands:
+            if c.is_displayed() and c.get_attribute("readonly") is None:
+                inp = c
+                break
+    except Exception:
+        pass
     if not inp:
-        log.warning("Поле адресата не найдено")
+        inp = find_input_near_label(driver, "Адресаты")
+    if not inp:
+        log.warning("Поле адресата не найдено (ни в #addressee_grid_id, ни по label)")
         return
 
     surname = person_name.split()[0]

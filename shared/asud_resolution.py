@@ -218,61 +218,111 @@ def wait_profile_loaded(driver, max_wait=60):
 # Sidebar
 # ============================================================
 
+# Маппинг названий sidebar-пунктов на стабильные id (из HTML-дампа).
+# Pattern: id="CABINET_MENU__<category>__<subcategory>" на <table>-элементе
+# внутри ListView-item'а.
+SIDEBAR_IDS = {
+    "На резолюцию":               "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_RESOLUTION",
+    "Исполнение":                 "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_EXECUTION",
+    "На исполнение":              "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_EXECUTION",
+    "Согласование":               "CABINET_MENU__RECEIVED__ALL_ACTIVE__APPROVAL",
+    "Подпись":                    "CABINET_MENU__RECEIVED__ALL_ACTIVE__SIGN",
+    "Регистрация":                "CABINET_MENU__RECEIVED__ALL_ACTIVE__REGISTRATION",
+    "Утверждение":                "CABINET_MENU__RECEIVED__ALL_ACTIVE__CONFIRMATION",
+    "Контроль исполнения":        "CABINET_MENU__RECEIVED__ALL_ACTIVE__EXECUTION_CONTROL",
+    "Снятие с контроля":          "CABINET_MENU__RECEIVED__ALL_ACTIVE__REMOVE_FROM_CONTROL",
+    "Доработка":                  "CABINET_MENU__RECEIVED__ALL_ACTIVE__REVISION",
+    "Проверка оформления":        "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_DECORATION_CHECK",
+    "Внесение":                   "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_INTRODUCTION",
+    "Рассмотрение":               "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_REVIEW",
+    "Голосование":                "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_VOTING",
+    "Подготовка рекомендаций":    "CABINET_MENU__RECEIVED__ALL_ACTIVE__PREPARATION_OF_RECOMMENDATIONS",
+    "Подтверждение идентичности": "CABINET_MENU__RECEIVED__ALL_ACTIVE__PROOF_IDENTITY",
+    "Запросы на аннулирование":   "CABINET_MENU__RECEIVED__ALL_ACTIVE__ANNULATION_REQUESTS",
+    "Верификация":                "CABINET_MENU__RECEIVED__ALL_ACTIVE__VERIFICATION",
+    "Печать":                     "CABINET_MENU__RECEIVED__ALL_ACTIVE__PRINT",
+    "Прикрепление оригинала":     "CABINET_MENU__RECEIVED__ALL_ACTIVE__ATTACHING_ORIGINAL",
+    "Завершённые":                "CABINET_MENU__RECEIVED__FINISHED",
+    "Завершенные":                "CABINET_MENU__RECEIVED__FINISHED",
+    "Черновики":                  "CABINET_MENU__MY_FOLDER__DRAFTS",
+    "Избранное":                  "CABINET_MENU__MY_FOLDER__FAVORITES",
+    "В работе":                   "CABINET_MENU__MY_FOLDER__IN_WORK",
+    "Просмотренные":              "CABINET_MENU__MY_FOLDER__VIEWED",
+    "Шаблоны документов":         "CABINET_MENU__ANONGRP__DOC_TEMPLATES",
+    "Корзина":                    "CABINET_MENU__ANONGRP__TRASH",
+}
+
+
 def click_sidebar_section(driver, section_text):
-    """Клик по пункту в левом сайдбаре. Пробует:
-      1) Точное совпадение по тексту
-      2) Несколько вариантов (с разными окончаниями)
-      3) Contains-совпадение (если предыдущие не нашли)
+    """Клик по пункту в левом сайдбаре. Стратегии в порядке предпочтения:
+
+      1) Если section_text есть в SIDEBAR_IDS — клик по <table id="...">
+         (стабильно, не зависит от текста/окончаний/headless)
+      2) Точное совпадение по тексту с морфологическими вариантами окончаний
+      3) Contains-search
+
     Подождёт до 15с пока пункт появится (sidebar может догружаться).
     """
     log.info(f"Сайдбар → '{section_text}'")
 
-    # Варианты на случай небольших расхождений в названии
-    base = section_text.rstrip('еиюуяай')  # отрезаем окончание
-    variants = [section_text]
-    # Добавим близкие варианты с разными окончаниями
-    for suffix in ('', 'е', 'и', 'ю', 'у', 'я', 'й', 'а'):
-        v = base + suffix
-        if v and v not in variants:
-            variants.append(v)
-
     target = None
     end = time.monotonic() + 15
-    while time.monotonic() < end and not target:
-        # Точные совпадения для каждой вариации
-        for v in variants:
+
+    # Стратегия 1: id-маппинг
+    sidebar_id = SIDEBAR_IDS.get(section_text)
+    if sidebar_id:
+        while time.monotonic() < end and not target:
+            try:
+                el = driver.find_element(By.ID, sidebar_id)
+                if el.is_displayed():
+                    target = el
+                    log.debug(f"  найден по id: {sidebar_id}")
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+    # Стратегия 2 + 3: fallback на text-search если id не помог или не известен
+    if not target:
+        base = section_text.rstrip('еиюуяай')
+        variants = [section_text]
+        for suffix in ('', 'е', 'и', 'ю', 'у', 'я', 'й', 'а'):
+            v = base + suffix
+            if v and v not in variants:
+                variants.append(v)
+
+        while time.monotonic() < end and not target:
+            for v in variants:
+                try:
+                    items = driver.find_elements(By.XPATH,
+                        f"//*[normalize-space(text())='{v}']")
+                    for it in items:
+                        if it.is_displayed():
+                            target = it
+                            if v != section_text:
+                                log.info(f"  найден по варианту: '{v}'")
+                            break
+                    if target:
+                        break
+                except Exception:
+                    continue
+            if target:
+                break
             try:
                 items = driver.find_elements(By.XPATH,
-                    f"//*[normalize-space(text())='{v}']")
+                    f"//td[contains(normalize-space(text()), '{section_text}')]")
                 for it in items:
                     if it.is_displayed():
                         target = it
-                        if v != section_text:
-                            log.info(f"  найден по варианту: '{v}'")
+                        log.info(f"  найден по contains: '{it.text!r}'")
                         break
-                if target:
-                    break
             except Exception:
-                continue
-        if target:
-            break
-        # Fallback — contains-search
-        try:
-            items = driver.find_elements(By.XPATH,
-                f"//td[contains(normalize-space(text()), '{section_text}')]")
-            for it in items:
-                if it.is_displayed():
-                    target = it
-                    log.info(f"  найден по contains: '{it.text!r}'")
-                    break
-        except Exception:
-            pass
-        if target:
-            break
-        time.sleep(0.5)
+                pass
+            if target:
+                break
+            time.sleep(0.5)
 
     if not target:
-        # Лог: какие пункты вообще есть в sidebar для диагностики
         try:
             visible_items = [el.text.strip() for el in driver.find_elements(
                 By.XPATH, "//td[normalize-space(text())]")
@@ -660,15 +710,39 @@ def toggle_switch(driver, label_text, target_value="true"):
 
 
 def set_stage_date_explicit(driver, deadline_str):
-    """Заполняет дату в поле 'Контрольный этап' = deadline_str (формат DD.MM.YYYY)."""
+    """Заполняет дату в поле 'Контрольный этап' = deadline_str (формат DD.MM.YYYY).
+
+    Стратегия:
+      1) Сначала ищем input внутри `#asudik-form-control_stage` (контейнер
+         появляется когда тоггл «Контрольная резолюция» включён)
+      2) Fallback — глобальный поиск `input[id*='stage_control_date']`
+    """
+    inp = None
     try:
-        inp = driver.find_element(By.CSS_SELECTOR,
-            "input[id*='stage_control_date']")
+        container = driver.find_element(By.ID, "asudik-form-control_stage")
+        cands = container.find_elements(By.CSS_SELECTOR, "input[type='text']")
+        for c in cands:
+            if c.is_displayed():
+                inp = c
+                break
+    except Exception:
+        pass
+    if not inp:
+        try:
+            inp = driver.find_element(By.CSS_SELECTOR,
+                "input[id*='stage_control_date']")
+        except Exception:
+            pass
+    if not inp:
+        log.warning("Поле даты этапа не найдено (ни в asudik-form-control_stage, "
+                    "ни по id*='stage_control_date')")
+        return False
+    try:
         js_set_value(driver, inp, deadline_str)
         log.info(f"Контрольный этап: {deadline_str}")
         return True
     except Exception as e:
-        log.warning(f"Поле даты этапа не найдено: {e}")
+        log.warning(f"Ошибка установки даты: {e}")
         return False
 
 
@@ -692,14 +766,23 @@ def compute_control_date(planned_date_str, fallback_days=3):
 
 
 def fill_executor(driver, fio):
-    """Вбивает ФИО в поле 'Исполнитель' (combobox), выбирает из выпадашки."""
+    """Вбивает ФИО в поле 'Исполнитель' (combobox), выбирает из выпадашки.
+    Приоритет — стабильный id `select_combobox-input` (по HTML-дампу).
+    Fallback — поиск по label «Исполнитель» (для старых АСУД без этого id).
+    """
     from shared.correspondent import match_correspondent
     try:
-        inp = find_input_near_label(driver, "Исполнитель")
-        if not inp:
+        inp = None
+        try:
             inp = driver.find_element(By.ID, "select_combobox-input")
+            if not inp.is_displayed():
+                inp = None
+        except Exception:
+            pass
         if not inp:
-            log.error("Поле 'Исполнитель' не найдено")
+            inp = find_input_near_label(driver, "Исполнитель")
+        if not inp:
+            log.error("Поле 'Исполнитель' не найдено (ни по id select_combobox-input, ни по label)")
             return False
 
         surname = fio.split()[0]
