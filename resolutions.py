@@ -961,10 +961,26 @@ def toggle_switch(driver, label_text, target_value="true"):
     return False
 
 
+def _xpath_lit(s):
+    """Безопасно квотит строку для XPath (учитывая возможные апострофы/кавычки)."""
+    if "'" not in s:
+        return f"'{s}'"
+    if '"' not in s:
+        return f'"{s}"'
+    parts = s.split("'")
+    return "concat(" + ", \"'\", ".join(f"'{p}'" for p in parts) + ")"
+
+
 def select_content_template(driver, template_text):
-    """Выбирает в поле "Содержание" пункт из выпадашки."""
+    """Выбирает в поле «Содержание» пункт из выпадашки шаблонов.
+
+    По HTML-дампу каждый пункт раскрытой выпадашки — это
+    <div data-marker="<template_text>">. Стабильнее text-match'а — не
+    путается с другими элементами с тем же текстом в DOM (например,
+    шаблон уже стоит в открытой карточке).
+    """
     try:
-        # input с placeholder "Общие формулировки"
+        # 1. Клик в поле «Содержание» чтобы раскрыть выпадашку
         inp = None
         candidates = driver.find_elements(By.CSS_SELECTOR,
             "input[placeholder='Общие формулировки']")
@@ -973,24 +989,22 @@ def select_content_template(driver, template_text):
                 inp = c
                 break
         if not inp:
-            # Fallback — поиск по label "Содержание"
             inp = find_input_near_label(driver, "Содержание")
         if not inp:
             log.error("Поле 'Содержание' не найдено")
             return False
-
         click(driver, inp, "Содержание")
-        # Ждём появления нужного пункта в дропдауне
+
+        # 2. Ждём появления элемента выпадашки с нужным data-marker'ом
+        target_xpath = f"//div[@data-marker={_xpath_lit(template_text)}]"
         try:
             WebDriverWait(driver, 5).until(
-                lambda d: any(it.is_displayed() for it in d.find_elements(
-                    By.XPATH, f"//*[normalize-space(text())='{template_text}']")))
+                lambda d: any(e.is_displayed() for e in d.find_elements(By.XPATH, target_xpath)))
         except Exception:
-            log.debug("Дропдаун не появился за 5s")
+            log.debug(f"Не нашёл по data-marker '{template_text}', пробую по тексту")
+            target_xpath = f"//*[normalize-space(text())={_xpath_lit(template_text)}]"
 
-        # Дропдаун с пунктами
-        items = driver.find_elements(By.XPATH,
-            f"//*[normalize-space(text())='{template_text}']")
+        items = driver.find_elements(By.XPATH, target_xpath)
         target = None
         for it in items:
             try:
@@ -1000,7 +1014,7 @@ def select_content_template(driver, template_text):
             except Exception:
                 continue
         if not target:
-            log.error(f"Пункт '{template_text}' в выпадашке не найден")
+            log.error(f"Пункт '{template_text}' в выпадашке 'Содержание' не найден")
             return False
         click(driver, target, f"Содержание: {template_text}")
         time.sleep(0.5)
