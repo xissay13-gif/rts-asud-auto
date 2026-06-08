@@ -1585,12 +1585,45 @@ def main():
 
         done, err, skip = 0, 0, 0
 
-        def _reset_to_list():
-            """Сброс к списку документов после ошибки: перезагрузить АСУД,
-            заново переключить учётку, заново зайти в сайдбар. Используется
-            и при exception, и при graceful return False — иначе зависшая
-            модалка перекрывает список и каскадно валит все следующие документы.
+        def _list_accessible():
+            """Проверка: видим ли фильтр-input на колонке Номер. Если да —
+            список доступен, никакая модалка/карточка не блокирует."""
+            try:
+                inp = driver.find_element(By.ID, NUMBER_FILTER_INPUT_ID)
+                return inp.is_displayed()
+            except Exception:
+                return False
+
+        def _reset_to_list(force_full=False):
+            """Сброс к списку документов. Двухуровневая стратегия:
+
+            1) Lightweight: закрыть открытые модалки/карточки через close_open_modals
+               + header-close-btn. Если после этого фильтр-input доступен — выходим
+               (быстро, без перезагрузки АСУД).
+            2) Full reload: driver.get(url) + switch_account + сайдбар. Только
+               если lightweight не помог ИЛИ force_full=True.
+
+            Это решает кейс: process_one успешно отправил резолюцию, но
+            close_card_after_resolution не закрыла карточку — раньше следующий
+            документ падал, теперь lightweight закрывает её за <1s.
             """
+            if not force_full:
+                # Lightweight
+                try:
+                    close_open_modals(driver)
+                except Exception:
+                    pass
+                try:
+                    btn = driver.find_element(By.ID, "header-close-btn")
+                    if btn.is_displayed():
+                        click(driver, btn, "header-close-btn (reset)")
+                except Exception:
+                    pass
+                if _list_accessible():
+                    log.debug("[reset] lightweight: список доступен")
+                    return
+                log.info("[reset] lightweight не помог — полная перезагрузка")
+            # Full reload
             try:
                 driver.get(url)
                 _wait_profile_loaded(driver)
@@ -1606,16 +1639,18 @@ def main():
                 ok = process_one(driver, doc, i, len(docs))
                 if ok:
                     done += 1
+                    # Защита: после успеха карточка могла остаться открытой —
+                    # проверим что список доступен, иначе закроем.
+                    if not _list_accessible():
+                        log.info("[main] список не доступен после success — lightweight reset")
+                        _reset_to_list()
                 else:
                     skip += 1
-                    # process_one вернул False — модалка могла остаться открытой
-                    # (например, «Добавить» не активировалась, close_open_modals
-                    # не помог). Принудительный сброс перед следующим документом.
                     _reset_to_list()
             except Exception as e:
                 log.error(f"ОШИБКА документ {i}: {e}")
                 err += 1
-                _reset_to_list()
+                _reset_to_list(force_full=True)
 
         elapsed_seconds = time.monotonic() - start_time
         elapsed = timedelta(seconds=int(elapsed_seconds))
