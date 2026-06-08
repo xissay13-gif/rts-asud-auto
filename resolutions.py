@@ -1480,6 +1480,7 @@ def _maybe_quit(driver, attached):
 def main():
     global settings
     settings = cfg.load()
+    cfg.keep_system_awake(True)
 
     log.info("=" * 50)
     log.info("АСУД ИК — выдача резолюций")
@@ -1595,6 +1596,7 @@ def main():
         input("Enter...")
     finally:
         _maybe_quit(driver, attached)
+        cfg.keep_system_awake(False)
 
 
 if __name__ == "__main__":

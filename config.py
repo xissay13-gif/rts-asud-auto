@@ -102,3 +102,66 @@ def load():
         except Exception as e:
             log.warning(f"Ошибка чтения config.json: {e}, используем дефолты")
     return cfg
+
+
+# ============================================================
+# Анти-сон Windows
+# ============================================================
+
+import threading
+
+_keep_awake_thread = None
+_keep_awake_stop = threading.Event()
+
+
+def _keep_awake_heartbeat():
+    """Daemon-поток: раз в 30с переподтверждает SetThreadExecutionState."""
+    import ctypes
+    ES_CONTINUOUS = 0x80000000
+    ES_SYSTEM_REQUIRED = 0x00000001
+    ES_DISPLAY_REQUIRED = 0x00000002
+    flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+    while not _keep_awake_stop.wait(30):
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(flags)
+        except Exception:
+            break
+
+
+def keep_system_awake(enabled=True):
+    """Блокирует Windows-таймер автосна на время процесса.
+
+    Использует SetThreadExecutionState с ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+    | ES_DISPLAY_REQUIRED. Дополнительно поднимает daemon-поток который
+    переподтверждает запрос каждые 30 секунд (на некоторых корпоративных
+    машинах флаг сбрасывался при долгих Selenium-операциях).
+
+    На Linux/macOS — no-op. Реверт автоматический при выходе процесса.
+    """
+    global _keep_awake_thread
+    if not sys.platform.startswith('win'):
+        return
+    log_a = logging.getLogger("asud")
+    try:
+        import ctypes
+        ES_CONTINUOUS = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+        ES_DISPLAY_REQUIRED = 0x00000002
+        if enabled:
+            flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+            ctypes.windll.kernel32.SetThreadExecutionState(flags)
+            log_a.info("Сон Windows и таймер дисплея заблокированы (+heartbeat 30с)")
+            if _keep_awake_thread is None or not _keep_awake_thread.is_alive():
+                _keep_awake_stop.clear()
+                _keep_awake_thread = threading.Thread(
+                    target=_keep_awake_heartbeat,
+                    daemon=True,
+                    name="keep-awake-hb",
+                )
+                _keep_awake_thread.start()
+        else:
+            _keep_awake_stop.set()
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+            log_a.info("Сон Windows разблокирован")
+    except Exception as e:
+        log_a.debug(f"keep_system_awake не сработал: {e}")
