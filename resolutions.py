@@ -48,10 +48,12 @@ start_time = time.monotonic()
 
 
 def _attach_file_logger(base_dir):
-    """Подключает FileHandler с DEBUG: <base_dir>/resolutions_<timestamp>.log."""
+    """Подключает FileHandler с DEBUG: <base_dir>/Logs/resolutions_<timestamp>.log."""
     try:
+        logs_dir = os.path.join(base_dir, "Logs")
+        os.makedirs(logs_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(base_dir, f"resolutions_{ts}.log")
+        path = os.path.join(logs_dir, f"resolutions_{ts}.log")
         fh = logging.FileHandler(path, encoding='utf-8')
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(logging.Formatter(
