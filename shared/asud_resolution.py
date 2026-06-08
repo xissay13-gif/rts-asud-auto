@@ -40,25 +40,36 @@ NUMBER_FILTER_CONTAINER_ID = "FCPC_Номер"
 # Переключение учётки
 # ============================================================
 
-def _account_active(driver, target_substring):
+def _account_active(driver, target_substring, timeout=0):
     """Проверяет, что в шапке страницы (y < 80, где лежит ФИО текущего юзера)
-    виден элемент с target_substring. Используется для early-return
-    (уже под нужной учёткой) и для пост-верификации после переключения.
+    виден элемент с target_substring.
+
+    timeout > 0 — поллит каждые 0.5с пока шапка не отрендерится. Под Edge 148
+    АСУД иногда показывает ФИО пользователя в шапке через 5-8с после
+    _wait_profile_loaded. Без ожидания _account_active отдаст False и прога
+    подумает что надо переключаться (а в шапке уже та учётка что нужна).
     """
-    try:
-        elems = driver.find_elements(By.XPATH,
-            f"//*[contains(normalize-space(text()), '{target_substring}')]")
-        for e in elems:
-            try:
-                if not e.is_displayed():
+    end = time.monotonic() + max(timeout, 0)
+    first_pass = True
+    while first_pass or time.monotonic() < end:
+        first_pass = False
+        try:
+            elems = driver.find_elements(By.XPATH,
+                f"//*[contains(normalize-space(text()), '{target_substring}')]")
+            for e in elems:
+                try:
+                    if not e.is_displayed():
+                        continue
+                    rect = e.rect
+                    if rect.get('y', 1000) < 80:
+                        return True
+                except Exception:
                     continue
-                rect = e.rect
-                if rect.get('y', 1000) < 80:
-                    return True
-            except Exception:
-                continue
-    except Exception:
-        pass
+        except Exception:
+            pass
+        if time.monotonic() >= end:
+            break
+        time.sleep(0.5)
     return False
 
 
@@ -71,8 +82,9 @@ def switch_account(driver, target_substring):
     """
     log.info(f"Переключение на учётку: {target_substring}")
 
-    # Early return: уже под нужной учёткой
-    if _account_active(driver, target_substring):
+    # Early return: уже под нужной учёткой. timeout=10 — ждём пока шапка
+    # отрендерится (под Edge 148 ФИО появляется через 5-8с после wait_asud_loaded).
+    if _account_active(driver, target_substring, timeout=10):
         log.info(f"Уже под учёткой '{target_substring}' — пропускаю переключение")
         return True
 
