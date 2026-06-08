@@ -379,6 +379,7 @@ def main():
     global settings
     settings = cfg.load()
     cfg.setup_file_logger("smart")
+    cfg.keep_system_awake(True)
 
     log.info("=" * 50)
     log.info("АСУД ИК — Smart-routing (черновики с прикреплением .msg)")
@@ -486,6 +487,7 @@ def main():
             driver.quit()
         except Exception:
             pass
+        cfg.keep_system_awake(False)
 
 
 if __name__ == "__main__":

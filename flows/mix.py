@@ -832,6 +832,7 @@ def main():
     global settings
     settings = cfg.load()
     cfg.setup_file_logger("mix")
+    cfg.keep_system_awake(True)
 
     log.info("=" * 50)
     log.info("АСУД ИК — MIX (auto-create + smart-routing)")
@@ -1017,8 +1018,12 @@ def main():
         log.error(f"Ошибка: {e}")
         input("Enter...")
     finally:
-        driver.quit()
-        log.info("Браузер закрыт")
+        try:
+            driver.quit()
+            log.info("Браузер закрыт")
+        except Exception:
+            pass
+        cfg.keep_system_awake(False)
 
 
 if __name__ == "__main__":
