@@ -148,19 +148,29 @@ def switch_account(driver, target_substring):
             if not it.is_displayed():
                 continue
             rect = it.rect
-            # Dropdown профиля раскрывается сверху-слева: y от 100 до ~500,
-            # x < 500. Иначе это карточка документа / sidebar / поле формы,
-            # где target_substring может совпасть случайно (например, Басманов
-            # стоит как Адресат в только что зарегистрированных документах).
-            if 100 < rect.get('y', 0) < 500 and rect.get('x', 0) < 500:
+            # Dropdown профиля раскрывается под триггером (y=24+16=40), пункты
+            # обычно на y=50-150. Карточки документов / sidebar — на y > 300.
+            # Используем 40 < y < 300 + x < 500. Раньше нижняя граница была 100,
+            # из-за чего легитимный пункт выпадашки на y=73 отфильтровывался.
+            if 40 < rect.get('y', 0) < 300 and rect.get('x', 0) < 500:
                 target = it
                 break
         except Exception:
             continue
     if not target:
+        # Диагностика: выведем координаты ВСЕХ видимых совпадений
+        all_rects = []
+        for it in items:
+            try:
+                if it.is_displayed():
+                    r = it.rect
+                    all_rects.append(f"(x={r.get('x')}, y={r.get('y')})")
+            except Exception:
+                pass
         log.error(f"Пункт с '{target_substring}' в dropdown'е профиля не найден "
-                  f"(всего совпадений: {len(items)}, видимых в нужной области: 0). "
-                  f"Возможно, выпадашка не открылась.")
+                  f"(всего совпадений: {len(items)}, видимых: {len(all_rects)}). "
+                  f"Координаты видимых: {', '.join(all_rects) or '—'}. "
+                  f"Возможно, выпадашка не открылась или искомый пункт вне диапазона.")
         return False
 
     click(driver, target, f"учётка {target_substring}")
