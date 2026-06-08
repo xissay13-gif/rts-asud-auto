@@ -40,12 +40,41 @@ NUMBER_FILTER_CONTAINER_ID = "FCPC_Номер"
 # Переключение учётки
 # ============================================================
 
+def _account_active(driver, target_substring):
+    """Проверяет, что в шапке страницы (y < 80, где лежит ФИО текущего юзера)
+    виден элемент с target_substring. Используется для early-return
+    (уже под нужной учёткой) и для пост-верификации после переключения.
+    """
+    try:
+        elems = driver.find_elements(By.XPATH,
+            f"//*[contains(normalize-space(text()), '{target_substring}')]")
+        for e in elems:
+            try:
+                if not e.is_displayed():
+                    continue
+                rect = e.rect
+                if rect.get('y', 1000) < 80:
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
 def switch_account(driver, target_substring):
     """Переключается на учётку, ФИО которой содержит target_substring.
-    1. Клик по dropdown-стрелке в шапке профиля
-    2. Клик по пункту с нужным ФИО в выпадашке
+    1. Если уже на этой учётке (видно в шапке) — пропускаем
+    2. Клик по dropdown-стрелке в шапке профиля
+    3. Клик по пункту с нужным ФИО в выпадашке (только в области dropdown)
+    4. Пост-верификация: в шапке должен появиться target_substring
     """
     log.info(f"Переключение на учётку: {target_substring}")
+
+    # Early return: уже под нужной учёткой
+    if _account_active(driver, target_substring):
+        log.info(f"Уже под учёткой '{target_substring}' — пропускаю переключение")
+        return True
 
     # Шаг 1: клик ▼ рядом с именем профиля
     try:
@@ -107,21 +136,35 @@ def switch_account(driver, target_substring):
             if not it.is_displayed():
                 continue
             rect = it.rect
-            if rect.get('y', 0) > 100:
+            # Dropdown профиля раскрывается сверху-слева: y от 100 до ~500,
+            # x < 500. Иначе это карточка документа / sidebar / поле формы,
+            # где target_substring может совпасть случайно (например, Басманов
+            # стоит как Адресат в только что зарегистрированных документах).
+            if 100 < rect.get('y', 0) < 500 and rect.get('x', 0) < 500:
                 target = it
                 break
         except Exception:
             continue
-    if not target and items:
-        target = next((i for i in items if i.is_displayed()), None)
     if not target:
-        log.error(f"Пункт с '{target_substring}' не найден")
+        log.error(f"Пункт с '{target_substring}' в dropdown'е профиля не найден "
+                  f"(всего совпадений: {len(items)}, видимых в нужной области: 0). "
+                  f"Возможно, выпадашка не открылась.")
         return False
 
     click(driver, target, f"учётка {target_substring}")
     log.info("Переключение запущено, жду перезагрузку АСУД")
     wait_profile_loaded(driver)
-    return True
+
+    # Пост-верификация: в шапке должна появиться целевая учётка
+    end = time.monotonic() + 30
+    while time.monotonic() < end:
+        if _account_active(driver, target_substring):
+            log.info(f"Учётка переключена на '{target_substring}'")
+            return True
+        time.sleep(1)
+    log.error(f"Учётка НЕ переключилась на '{target_substring}' — "
+              f"в шапке нет этого ФИО за 30с. Возможно кликнулся не тот элемент.")
+    return False
 
 
 def wait_profile_loaded(driver, max_wait=60):
