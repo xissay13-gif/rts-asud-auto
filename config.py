@@ -34,6 +34,37 @@ DEFAULTS = {
     "require_report": True,
     # Включать ли тоггл "Контрольная резолюция".
     "control_resolution": True,
+    # Если задано — подменяет исполнителя для ВСЕХ строк реестра (используется
+    # пресетом «ГИСЖКХ → Халецкая», где executor берётся не из округа, а одинаков).
+    "force_executor": "",
+    # Режим расчёта даты контрольного этапа: 'workdays' (по умолчанию, today + N рабочих)
+    # или 'calendar' (today + N календарных). Преcет ZHKH-Халецкая использует 'calendar'.
+    "stage_date_mode": "workdays",
+    # Кол-во дней для контрольного этапа. Если пусто — используется workdays.
+    "stage_date_days": 0,
+    # Пресеты сценариев для меню выбора. Каждый пресет может перекрыть любые поля
+    # выше (target_account, sidebar_section, force_executor, stage_date_mode/days,
+    # resolution_content и т.д.). Меню показывается при старте если presets не пуст.
+    "presets": [
+        {
+            "name": "Округа → начальницам (под Халецкой)",
+            "target_account": "Халецкая",
+            "sidebar_section": "Исполнение",
+            "force_executor": "",
+            "resolution_content": "Подготовить ответ",
+            "stage_date_mode": "workdays",
+            "stage_date_days": 7,
+        },
+        {
+            "name": "ГИСЖКХ → Халецкая (под Басмановым)",
+            "target_account": "Басманов",
+            "sidebar_section": "На резолюцию",
+            "force_executor": "Халецкая Юлия Владимировна",
+            "resolution_content": "Для работы",
+            "stage_date_mode": "calendar",
+            "stage_date_days": 3,
+        },
+    ],
 }
 
 # Округ → ФИО начальника. Используется как fallback, если в реестре

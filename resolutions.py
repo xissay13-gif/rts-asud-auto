@@ -923,8 +923,18 @@ def add_business_days(start, days):
 
 
 def set_stage_date(driver, n_workdays):
-    """Заполняет дату в поле 'Контрольный этап' = today + n рабочих дней."""
-    deadline = add_business_days(date.today(), n_workdays).strftime("%d.%m.%Y")
+    """Заполняет дату в поле 'Контрольный этап'.
+
+    По умолчанию today + n_workdays рабочих. Если settings.stage_date_mode ==
+    'calendar' — today + N календарных (N = settings.stage_date_days или
+    n_workdays как fallback).
+    """
+    mode = settings.get("stage_date_mode", cfg.DEFAULTS["stage_date_mode"])
+    n_days = settings.get("stage_date_days") or n_workdays
+    if mode == "calendar":
+        deadline = (date.today() + timedelta(days=n_days)).strftime("%d.%m.%Y")
+    else:
+        deadline = add_business_days(date.today(), n_days).strftime("%d.%m.%Y")
     try:
         inp = driver.find_element(By.CSS_SELECTOR,
             "input[id*='stage_control_date']")
@@ -1287,6 +1297,35 @@ def process_one(driver, doc, index, total):
 # MAIN
 # ============================================================
 
+def _pick_preset(presets):
+    """Меню пресетов сценариев. Возвращает выбранный preset dict или None."""
+    print("\nВыбери сценарий:")
+    for i, p in enumerate(presets, 1):
+        name = p.get("name", "?")
+        acc = p.get("target_account", "?")
+        exe = p.get("force_executor", "") or "(из округа)"
+        print(f"  {i}. {name}")
+        print(f"      учётка: {acc}  |  исполнитель: {exe}")
+    print(f"[Enter] = 1")
+    choice = input(f"Номер (1-{len(presets)}) или Enter: ").strip()
+    if not choice:
+        return presets[0]
+    try:
+        return presets[int(choice) - 1]
+    except (ValueError, IndexError):
+        log.warning(f"Неверный выбор '{choice}'")
+        return None
+
+
+def _apply_preset_to_settings(preset):
+    """Перекрывает поля settings полями пресета (in-place)."""
+    for key in ("target_account", "sidebar_section", "force_executor",
+                "resolution_content", "stage_date_mode", "stage_date_days",
+                "require_report", "control_resolution"):
+        if key in preset:
+            settings[key] = preset[key]
+
+
 def _choose_xlsx(base_dir):
     files = [f for f in os.listdir(base_dir) if f.lower().endswith('.xlsx')]
     if not files:
@@ -1399,11 +1438,28 @@ def main():
     settings = cfg.load()
 
     log.info("=" * 50)
-    log.info("АСУД ИК — выдача резолюций (под Халецкой)")
+    log.info("АСУД ИК — выдача резолюций")
     log.info("=" * 50)
 
     base_dir = cfg.get_base_dir()
     _attach_file_logger(base_dir)
+
+    # Меню пресетов (если есть в конфиге)
+    presets = settings.get("presets") or []
+    if presets:
+        preset = _pick_preset(presets)
+        if preset is None:
+            log.error("Пресет не выбран — выход")
+            sys.exit(1)
+        log.info(f"Пресет: {preset.get('name', '?')}")
+        _apply_preset_to_settings(preset)
+        log.info(f"  учётка:       {settings.get('target_account')}")
+        log.info(f"  сайдбар:      {settings.get('sidebar_section')}")
+        log.info(f"  исполнитель:  {settings.get('force_executor') or '(из округа)'}")
+        log.info(f"  содержание:   {settings.get('resolution_content')}")
+        log.info(f"  контр. срок:  {settings.get('stage_date_mode')} "
+                 f"+{settings.get('stage_date_days') or settings.get('workdays')}")
+
     excel_path = _choose_xlsx(base_dir)
     log.info(f"Реестр: {excel_path}")
 
@@ -1412,6 +1468,13 @@ def main():
         log.error("Реестр пуст")
         input("Enter...")
         sys.exit(1)
+
+    # Если пресет задаёт force_executor — подменяем у всех строк
+    force_exe = settings.get("force_executor", "").strip()
+    if force_exe:
+        for d in docs:
+            d['executor'] = force_exe
+        log.info(f"Исполнитель для всех {len(docs)} строк подменён: {force_exe}")
 
     # Превью
     print(f"\nПервые 5:")
