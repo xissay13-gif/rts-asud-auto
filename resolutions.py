@@ -558,24 +558,77 @@ def switch_account(driver, target_substring):
 # UI: сайдбар → "На резолюцию"
 # ============================================================
 
+# Маппинг названий sidebar-пунктов на стабильные id (из HTML-дампа).
+# Pattern: id="CABINET_MENU__<category>__<subcategory>" на <table>-элементе.
+SIDEBAR_IDS = {
+    "На резолюцию":               "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_RESOLUTION",
+    "Исполнение":                 "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_EXECUTION",
+    "На исполнение":              "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_EXECUTION",
+    "Согласование":               "CABINET_MENU__RECEIVED__ALL_ACTIVE__APPROVAL",
+    "Подпись":                    "CABINET_MENU__RECEIVED__ALL_ACTIVE__SIGN",
+    "Регистрация":                "CABINET_MENU__RECEIVED__ALL_ACTIVE__REGISTRATION",
+    "Утверждение":                "CABINET_MENU__RECEIVED__ALL_ACTIVE__CONFIRMATION",
+    "Контроль исполнения":        "CABINET_MENU__RECEIVED__ALL_ACTIVE__EXECUTION_CONTROL",
+    "Снятие с контроля":          "CABINET_MENU__RECEIVED__ALL_ACTIVE__REMOVE_FROM_CONTROL",
+    "Доработка":                  "CABINET_MENU__RECEIVED__ALL_ACTIVE__REVISION",
+    "Проверка оформления":        "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_DECORATION_CHECK",
+    "Внесение":                   "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_INTRODUCTION",
+    "Рассмотрение":               "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_REVIEW",
+    "Голосование":                "CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_VOTING",
+    "Подготовка рекомендаций":    "CABINET_MENU__RECEIVED__ALL_ACTIVE__PREPARATION_OF_RECOMMENDATIONS",
+    "Подтверждение идентичности": "CABINET_MENU__RECEIVED__ALL_ACTIVE__PROOF_IDENTITY",
+    "Запросы на аннулирование":   "CABINET_MENU__RECEIVED__ALL_ACTIVE__ANNULATION_REQUESTS",
+    "Верификация":                "CABINET_MENU__RECEIVED__ALL_ACTIVE__VERIFICATION",
+    "Печать":                     "CABINET_MENU__RECEIVED__ALL_ACTIVE__PRINT",
+    "Прикрепление оригинала":     "CABINET_MENU__RECEIVED__ALL_ACTIVE__ATTACHING_ORIGINAL",
+    "Завершённые":                "CABINET_MENU__RECEIVED__FINISHED",
+    "Завершенные":                "CABINET_MENU__RECEIVED__FINISHED",
+    "Черновики":                  "CABINET_MENU__MY_FOLDER__DRAFTS",
+    "Избранное":                  "CABINET_MENU__MY_FOLDER__FAVORITES",
+    "В работе":                   "CABINET_MENU__MY_FOLDER__IN_WORK",
+    "Просмотренные":              "CABINET_MENU__MY_FOLDER__VIEWED",
+    "Шаблоны документов":         "CABINET_MENU__ANONGRP__DOC_TEMPLATES",
+    "Корзина":                    "CABINET_MENU__ANONGRP__TRASH",
+}
+
+
 def click_sidebar_section(driver, section_text):
-    """Клик по пункту в левом сайдбаре."""
+    """Клик по пункту в левом сайдбаре.
+
+    Приоритет — стабильный id из SIDEBAR_IDS (по HTML-дампу). Fallback —
+    text-search по xpath. Поллит до 10 секунд.
+    """
     log.info(f"Сайдбар → '{section_text}'")
-    items = driver.find_elements(By.XPATH,
-        f"//*[normalize-space(text())='{section_text}']")
     target = None
-    for it in items:
-        try:
-            if it.is_displayed():
-                target = it
-                break
-        except Exception:
-            continue
+    end = time.monotonic() + 10
+
+    sidebar_id = SIDEBAR_IDS.get(section_text)
+    if sidebar_id:
+        while time.monotonic() < end and not target:
+            try:
+                el = driver.find_element(By.ID, sidebar_id)
+                if el.is_displayed():
+                    target = el
+                    log.debug(f"  найден по id: {sidebar_id}")
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+    if not target:
+        items = driver.find_elements(By.XPATH,
+            f"//*[normalize-space(text())='{section_text}']")
+        for it in items:
+            try:
+                if it.is_displayed():
+                    target = it
+                    break
+            except Exception:
+                continue
     if not target:
         log.error(f"Пункт сайдбара '{section_text}' не найден")
         return False
     click(driver, target, f"сайдбар: {section_text}")
-    # Ждём появления первой строки данных в гриде вместо фиксированного sleep
     try:
         WebDriverWait(driver, 10).until(
             lambda d: len(d.find_elements(By.XPATH, DATA_ROW_XPATH)) > 0)
@@ -1047,27 +1100,54 @@ def set_stage_date(driver, n_workdays):
         deadline = (date.today() + timedelta(days=n_days)).strftime("%d.%m.%Y")
     else:
         deadline = add_business_days(date.today(), n_days).strftime("%d.%m.%Y")
+    # Приоритет — внутри #asudik-form-control_stage (стабильный id из дампа).
+    inp = None
     try:
-        inp = driver.find_element(By.CSS_SELECTOR,
-            "input[id*='stage_control_date']")
+        container = driver.find_element(By.ID, "asudik-form-control_stage")
+        cands = container.find_elements(By.CSS_SELECTOR, "input[type='text']")
+        for c in cands:
+            if c.is_displayed():
+                inp = c
+                break
+    except Exception:
+        pass
+    if not inp:
+        try:
+            inp = driver.find_element(By.CSS_SELECTOR,
+                "input[id*='stage_control_date']")
+        except Exception:
+            pass
+    if not inp:
+        log.warning("Поле даты этапа не найдено (ни в asudik-form-control_stage, "
+                    "ни по id*='stage_control_date')")
+        return False
+    try:
         js_set_value(driver, inp, deadline)
         log.info(f"Контрольный этап: {deadline}")
         return True
     except Exception as e:
-        log.warning(f"Поле даты этапа не найдено: {e}")
+        log.warning(f"Ошибка установки даты: {e}")
         return False
 
 
 def fill_executor(driver, fio):
-    """Вбивает ФИО в поле 'Исполнитель' (combobox), выбирает из выпадашки."""
+    """Вбивает ФИО в поле 'Исполнитель' (combobox), выбирает из выпадашки.
+
+    Приоритет — стабильный id #select_combobox-input (по HTML-дампу).
+    Fallback — find_input_near_label("Исполнитель").
+    """
     try:
-        # Ищем поле по label "Исполнитель"
-        inp = find_input_near_label(driver, "Исполнитель")
-        if not inp:
-            # Fallback — input id select_combobox-input
+        inp = None
+        try:
             inp = driver.find_element(By.ID, "select_combobox-input")
+            if not inp.is_displayed():
+                inp = None
+        except Exception:
+            pass
         if not inp:
-            log.error("Поле 'Исполнитель' не найдено")
+            inp = find_input_near_label(driver, "Исполнитель")
+        if not inp:
+            log.error("Поле 'Исполнитель' не найдено (ни по id select_combobox-input, ни по label)")
             return False
 
         surname = fio.split()[0]
