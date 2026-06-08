@@ -585,16 +585,45 @@ def _wait_data_value(driver, container, target_value="true", timeout=5):
     return False
 
 
+# Маппинг русских лейблов на стабильные id контейнеров тогглов.
+# По HTML-дампу: каждый тоггл в форме резолюции лежит в div'е с id
+# 'asudik-form-need_report' (или need_control), внутри — два видимых
+# div[data-value][class*=switcherContainer], текущее значение = data-value.
+# Раньше поиск шёл по xpath-text лейбла, но АСУД пишет «Требуется отчет»
+# БЕЗ ё, а в конфиге было С ё — тоггл не находился.
+_TOGGLE_CONTAINERS = {
+    "Требуется отчёт":     "asudik-form-need_report",
+    "Требуется отчет":     "asudik-form-need_report",
+    "Контрольная резолюция": "asudik-form-need_control",
+}
+
+
 def toggle_switch(driver, label_text, target_value="true"):
-    """Переключает тоггл рядом с label_text в нужное состояние."""
-    try:
-        label = driver.find_element(By.XPATH,
-            f"//*[normalize-space(text())='{label_text}']")
-        container = label.find_element(By.XPATH,
-            "./following::*[contains(@class,'switcherContainer')][1]")
-    except Exception as e:
-        log.warning(f"Тоггл '{label_text}' не найден: {e}")
-        return False
+    """Переключает тоггл в нужное состояние.
+
+    Сначала пробует найти контейнер по стабильному id (для известных лейблов),
+    fallback — поиск по xpath-text (для лейблов которых нет в маппинге).
+    """
+    container = None
+    container_id = _TOGGLE_CONTAINERS.get(label_text)
+    if container_id:
+        try:
+            wrapper = driver.find_element(By.ID, container_id)
+            container = wrapper.find_element(By.CSS_SELECTOR,
+                "div[data-value][class*='switcherContainer']")
+        except Exception as e:
+            log.debug(f"Тоггл '{label_text}' по id {container_id!r} не найден: {e}")
+
+    if container is None:
+        # Fallback на старую логику: поиск по тексту лейбла
+        try:
+            label = driver.find_element(By.XPATH,
+                f"//*[normalize-space(text())='{label_text}']")
+            container = label.find_element(By.XPATH,
+                "./following::*[contains(@class,'switcherContainer')][1]")
+        except Exception as e:
+            log.warning(f"Тоггл '{label_text}' не найден (ни по id, ни по тексту): {e}")
+            return False
 
     cur = container.get_attribute('data-value')
     if cur == target_value:
@@ -605,7 +634,7 @@ def toggle_switch(driver, label_text, target_value="true"):
     if _wait_data_value(driver, container, target_value, timeout=3):
         log.info(f"Тоггл '{label_text}' = {target_value}")
         return True
-    log.warning(f"Тоггл '{label_text}' не переключился")
+    log.warning(f"Тоггл '{label_text}' не переключился (data-value={container.get_attribute('data-value')})")
     return False
 
 
@@ -835,32 +864,17 @@ def submit_resolution(driver):
 def click_complete_button(driver, timeout=10):
     """Клик по кнопке «Завершить» в открытой карточке.
 
-    Кнопка — это <div> с текстом 'Завершить' (без id), зелёный фон #789440.
-    Может быть несколько таких элементов в DOM, берём первый видимый.
+    Стабильный id — `header-action-btn-finish_task` (по HTML-дампу).
+    Раньше искалась через xpath text-match по div'у с «Завершить», что
+    давало ложные срабатывания если в DOM было ещё что-то с этим словом.
     """
     log.info("Ищу кнопку 'Завершить'")
     try:
-        WebDriverWait(driver, timeout).until(
-            lambda d: any(b.is_displayed() for b in d.find_elements(
-                By.XPATH, "//div[normalize-space(text())='Завершить']")))
+        btn = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.ID, "header-action-btn-finish_task")))
     except Exception:
-        log.error("Кнопка 'Завершить' не появилась")
+        log.error("Кнопка 'Завершить' (#header-action-btn-finish_task) не появилась")
         return False
-
-    candidates = driver.find_elements(By.XPATH,
-        "//div[normalize-space(text())='Завершить']")
-    btn = None
-    for c in candidates:
-        try:
-            if c.is_displayed():
-                btn = c
-                break
-        except Exception:
-            continue
-    if not btn:
-        log.error("Кнопка 'Завершить' не найдена среди видимых")
-        return False
-
     click(driver, btn, "Завершить")
     log.info("Кнопка 'Завершить' нажата")
     return True
