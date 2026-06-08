@@ -35,6 +35,7 @@ import config as cfg
 from ui import (click, wait_and_click, find_input_near_label,
                 wait_asud_loaded, wait_modal_closed, close_open_modals, js_set_value)
 from correspondent import match_correspondent
+from xlsx_status import mark_status, get_done_asud_ids, COL_HALETSKAYA, COL_OKRUG
 
 _log_console = logging.StreamHandler()
 _log_console.setLevel(logging.INFO)
@@ -1333,6 +1334,15 @@ def process_one(driver, doc, index, total):
     log.info(f"--- ШАГ 12/12: очистка фильтра ---")
     clear_filter(driver)
     log.debug(f"  Шаг 12 OK")
+
+    # Пометка статуса в xlsx (если знаем путь). Колонка определяется по
+    # текущему сценарию: ZHKH-преcет → «Отписано Халецкой», иначе → «Отписано в округ».
+    xlsx_path = settings.get("_xlsx_path")
+    status_col = settings.get("_status_column")
+    if xlsx_path and status_col and doc.get('asud_id'):
+        if mark_status(xlsx_path, doc['asud_id'], status_col):
+            log.debug(f"  → xlsx: {doc['asud_id']} помечен «{status_col}»")
+
     log.info(f"ДОКУМЕНТ {index}/{total} ОБРАБОТАН за {time.monotonic()-t_start:.1f}s")
     return True
 
@@ -1520,6 +1530,28 @@ def main():
         for d in docs:
             d['executor'] = force_exe
         log.info(f"Исполнитель для всех {len(docs)} строк подменён: {force_exe}")
+
+    # Какую колонку статуса заполнять в xlsx после успешного process_one:
+    # ZHKH-сценарий (force_executor = Халецкая) → «Отписано Халецкой»
+    # иначе (стандартный flow Халецкая → округ) → «Отписано в округ»
+    status_col = COL_HALETSKAYA if 'халецк' in force_exe.lower() else COL_OKRUG
+    settings["_xlsx_path"] = excel_path
+    settings["_status_column"] = status_col
+    log.info(f"Статус в xlsx будет писаться в колонку: «{status_col}»")
+
+    # Skip-already-done: если у строки в реестре уже стоит дата в нужной
+    # status-колонке — этот документ уже отписан, пропускаем.
+    already = get_done_asud_ids(excel_path, status_col)
+    if already:
+        before = len(docs)
+        docs = [d for d in docs if d.get('asud_id') not in already]
+        skipped = before - len(docs)
+        if skipped:
+            log.info(f"Пропускаю {skipped} уже отписанных строк (есть отметка в «{status_col}»)")
+        if not docs:
+            log.info("Все строки реестра уже отписаны — нечего делать")
+            input("Enter...")
+            return
 
     # Превью
     print(f"\nПервые 5:")
