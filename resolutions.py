@@ -403,156 +403,154 @@ def load_excel(file_path):
 # UI: переключение учётки
 # ============================================================
 
-def _account_active(driver, target_substring, timeout=0):
-    """Проверяет, что в шапке страницы (y < 80, обычно строка пользователя
-    лежит вверху слева) виден элемент с target_substring.
+# ============================================================
+# Account switching — DOM-based (НЕ пиксельные координаты)
+# ============================================================
+#
+# АСУД-якоря (стабильные id/атрибуты, не зависят от viewport/headless):
+#
+#   #app-acc-icon-myprofile        — иконка-триггер в шапке (45×45), клик
+#                                     открывает выпадашку со списком учёток
+#
+#   span#app-acc-info[x-account-name="..."]  — отображает ФИО учётки.
+#                                     ЕСТЬ И В ШАПКЕ (текущая), И В ВЫПАДАШКЕ
+#                                     (доступные для переключения).
+#
+#   Разница: спан в шапке лежит без position:absolute родителя,
+#   а спан в выпадашке — внутри `<div style="...position: absolute;
+#   z-index: 1948;...">`. По наличию z-index в style любого предка
+#   надёжно отличаем «в шапке» от «в выпадашке».
+#
+# ============================================================
 
-    timeout > 0 — поллит каждые 0.5с пока шапка не отрендерится. Это важно
-    при первом запуске: под Edge 148 АСУД иногда рендерит ФИО пользователя
-    через 5-8с после _wait_profile_loaded. Без ожидания _account_active
-    отдаст False, и прога подумает что надо переключаться (а в шапке
-    уже та учётка что нужна).
+# XPath-предикат «предок имеет z-index в inline-style» — попап
+_IN_POPUP = "ancestor::div[contains(@style, 'z-index')]"
+
+
+def _current_account_text(driver):
+    """ФИО текущей учётки из шапки. Шапка содержит ОДИН видимый span с
+    id='app-acc-info', НЕ внутри popup'а (нет z-index родителя)."""
+    try:
+        spans = driver.find_elements(By.XPATH,
+            f"//span[@id='app-acc-info' and not({_IN_POPUP})]")
+        for s in spans:
+            try:
+                if s.is_displayed():
+                    return (s.text or '').strip()
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ''
+
+
+def _account_active(driver, target_substring, timeout=0):
+    """Проверяет, что в шапке отображается учётка с target_substring.
+
+    timeout > 0 — поллит каждые 0.5с, пока шапка не отрендерится. Под Edge 148
+    АСУД иногда показывает ФИО юзера в шапке через 5-8с после wait_asud_loaded
+    — без ожидания _account_active отдаст False и прога ложно решит, что
+    надо переключаться (а в шапке уже та учётка).
     """
     end = time.monotonic() + max(timeout, 0)
     first_pass = True
     while first_pass or time.monotonic() < end:
         first_pass = False
-        try:
-            elems = driver.find_elements(By.XPATH,
-                f"//*[contains(normalize-space(text()), '{target_substring}')]")
-            for e in elems:
-                try:
-                    if not e.is_displayed():
-                        continue
-                    rect = e.rect
-                    # Шапка: y < 80. Низ страницы / контент это y > 100.
-                    if rect.get('y', 1000) < 80:
-                        return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
+        cur = _current_account_text(driver)
+        if cur and target_substring.lower() in cur.lower():
+            return True
         if time.monotonic() >= end:
             break
         time.sleep(0.5)
     return False
 
 
+def _find_account_in_popup(driver, target_substring):
+    """Возвращает span с учёткой target_substring внутри открытой выпадашки
+    (находится внутри div с z-index в inline-style). None если не найден."""
+    try:
+        spans = driver.find_elements(By.XPATH,
+            f"//span[@id='app-acc-info' and contains(., '{target_substring}') "
+            f"and {_IN_POPUP}]")
+        for s in spans:
+            try:
+                if s.is_displayed():
+                    return s
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _popup_accounts(driver):
+    """Список текстов всех учёток в открытой выпадашке. Для диагностики."""
+    out = []
+    try:
+        spans = driver.find_elements(By.XPATH,
+            f"//span[@id='app-acc-info' and {_IN_POPUP}]")
+        for s in spans:
+            try:
+                if s.is_displayed():
+                    out.append((s.text or '').strip())
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
 def switch_account(driver, target_substring):
-    """Переключается на учётку, ФИО которой содержит target_substring.
-    1. Если уже на этой учётке (видно в шапке) — пропускаем
-    2. Клик по dropdown-стрелке в шапке профиля
-    3. Клик по пункту с нужным ФИО в выпадашке (только в области dropdown)
-    4. Пост-верификация: в шапке должен появиться target_substring
+    """Переключение учётки через выпадашку профиля.
+
+    1. _account_active(timeout=10) — если уже на нужной учётке, выходим
+    2. Клик по #app-acc-icon-myprofile (триггер выпадашки)
+    3. Ждём появления target_substring в выпадашке (in_popup)
+    4. Клик по спану учётки
+    5. Пост-верификация: _account_active(timeout=30)
     """
     log.info(f"Переключение на учётку: {target_substring}")
 
-    # Early return: уже под нужной учёткой.
-    # timeout=10 — даём шапке время отрендериться (под Edge 148 это до 8с
-    # после _wait_profile_loaded). Раньше проверка была мгновенная и
-    # промахивалась если ФИО ещё не появилось в DOM.
     if _account_active(driver, target_substring, timeout=10):
         log.info(f"Уже под учёткой '{target_substring}' — пропускаю переключение")
         return True
 
-    # Шаг 1: клик ▼ рядом с именем профиля
-    try:
-        # Стрелочка вниз обычно лежит рядом с блоком пользователя в самом верху страницы
-        # На скрине она 21x55px, расположена сразу справа от блока с именем
-        # Ищем по клик-целям рядом с блоком пользователя
-        triggers = driver.find_elements(By.CSS_SELECTOR,
-            "img[class*='trigger'], img[class*='Trigger'], div[class*='trigger']")
-        # Выбираем те что в верхней части страницы (top < 100px)
-        candidate = None
-        for t in triggers:
-            try:
-                if not t.is_displayed():
-                    continue
-                rect = t.rect
-                if rect.get('y', 0) < 120 and rect.get('x', 0) < 400:
-                    candidate = t
-                    break
-            except Exception:
-                continue
-        if not candidate:
-            # Fallback — любая стрелка/треугольник в верхнем левом углу
-            log.warning("Стрелка профиля не найдена по trigger-классам, пробую по позиции")
-            all_imgs = driver.find_elements(By.TAG_NAME, "img")
-            for im in all_imgs:
-                try:
-                    if not im.is_displayed(): continue
-                    rect = im.rect
-                    if rect.get('y', 0) < 120 and rect.get('x', 0) < 400 \
-                            and 10 <= rect.get('width', 0) <= 30:
-                        candidate = im
-                        break
-                except Exception:
-                    continue
-        if not candidate:
-            log.error("Не нашёл dropdown-стрелку профиля")
-            return False
-        click(driver, candidate, "▼ профиль")
-        # Ниже WebDriverWait сам ждёт появления пункта с target_substring
-    except Exception as e:
-        log.error(f"Ошибка клика по dropdown профиля: {e}")
-        return False
+    current = _current_account_text(driver)
+    log.info(f"Текущая учётка в шапке: '{current or '?'}'")
 
-    # Шаг 2: клик по пункту со строкой target_substring
+    # 1. Клик по триггеру
+    try:
+        trigger = driver.find_element(By.ID, "app-acc-icon-myprofile")
+    except Exception:
+        log.error("Триггер #app-acc-icon-myprofile не найден — старый АСУД?")
+        return False
+    if not trigger.is_displayed():
+        log.error("Триггер #app-acc-icon-myprofile невидим")
+        return False
+    click(driver, trigger, "иконка профиля")
+
+    # 2. Ждём появления нужной учётки в выпадашке
     try:
         WebDriverWait(driver, 10).until(
-            lambda d: any(target_substring in (e.text or '')
-                          for e in d.find_elements(By.CSS_SELECTOR, "div, span, label")
-                          if e.is_displayed()))
+            lambda d: _find_account_in_popup(d, target_substring) is not None)
     except Exception:
-        log.warning(f"Пункт '{target_substring}' в выпадашке не появился")
-
-    items = driver.find_elements(By.XPATH,
-        f"//*[contains(normalize-space(text()), '{target_substring}')]")
-    target = None
-    for it in items:
-        try:
-            if not it.is_displayed():
-                continue
-            rect = it.rect
-            # Dropdown профиля раскрывается под триггером (y=24+16=40), пункты
-            # обычно на y=50-150. Карточки документов / sidebar — на y > 300.
-            # Используем 40 < y < 300 + x < 500. Раньше нижняя граница была 100,
-            # из-за чего легитимный пункт выпадашки на y=73 отфильтровывался.
-            if 40 < rect.get('y', 0) < 300 and rect.get('x', 0) < 500:
-                target = it
-                break
-        except Exception:
-            continue
-
-    if not target:
-        # Диагностика: выведем координаты ВСЕХ видимых совпадений
-        all_rects = []
-        for it in items:
-            try:
-                if it.is_displayed():
-                    r = it.rect
-                    all_rects.append(f"(x={r.get('x')}, y={r.get('y')})")
-            except Exception:
-                pass
-        log.error(f"Пункт с '{target_substring}' в dropdown'е профиля не найден "
-                  f"(всего совпадений: {len(items)}, видимых: {len(all_rects)}). "
-                  f"Координаты видимых: {', '.join(all_rects) or '—'}. "
-                  f"Возможно, выпадашка не открылась или искомый пункт вне диапазона.")
+        available = _popup_accounts(driver)
+        log.error(f"Учётка '{target_substring}' не найдена в выпадашке. "
+                  f"Доступные в выпадашке: {available or '(пусто — возможно, выпадашка не открылась)'}")
         return False
 
+    # 3. Клик по найденной учётке
+    target = _find_account_in_popup(driver, target_substring)
     click(driver, target, f"учётка {target_substring}")
-    log.info("Переключение запущено, жду перезагрузку АСУД")
+    log.info("Клик по учётке, жду перезагрузку АСУД")
     _wait_profile_loaded(driver)
 
-    # Пост-верификация: в шапке должна появиться целевая учётка
-    end = time.monotonic() + 30
-    while time.monotonic() < end:
-        if _account_active(driver, target_substring):
-            log.info(f"Учётка переключена на '{target_substring}'")
-            return True
-        time.sleep(1)
-    log.error(f"Учётка НЕ переключилась на '{target_substring}' — "
-              f"в шапке нет этого ФИО за 30с. Возможно кликнулся не тот элемент.")
+    # 4. Пост-верификация
+    if _account_active(driver, target_substring, timeout=30):
+        log.info(f"Учётка переключена на '{target_substring}'")
+        return True
+    log.error(f"Учётка НЕ переключилась на '{target_substring}'. "
+              f"В шапке сейчас: '{_current_account_text(driver) or '?'}'")
     return False
 
 
