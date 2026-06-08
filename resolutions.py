@@ -1584,6 +1584,23 @@ def main():
             settings.get("sidebar_section", cfg.DEFAULTS["sidebar_section"]))
 
         done, err, skip = 0, 0, 0
+
+        def _reset_to_list():
+            """Сброс к списку документов после ошибки: перезагрузить АСУД,
+            заново переключить учётку, заново зайти в сайдбар. Используется
+            и при exception, и при graceful return False — иначе зависшая
+            модалка перекрывает список и каскадно валит все следующие документы.
+            """
+            try:
+                driver.get(url)
+                _wait_profile_loaded(driver)
+                switch_account(driver,
+                    settings.get("target_account", cfg.DEFAULTS["target_account"]))
+                click_sidebar_section(driver,
+                    settings.get("sidebar_section", cfg.DEFAULTS["sidebar_section"]))
+            except Exception as e:
+                log.warning(f"Reset to list упал: {e}")
+
         for i, doc in enumerate(docs, 1):
             try:
                 ok = process_one(driver, doc, i, len(docs))
@@ -1591,19 +1608,14 @@ def main():
                     done += 1
                 else:
                     skip += 1
+                    # process_one вернул False — модалка могла остаться открытой
+                    # (например, «Добавить» не активировалась, close_open_modals
+                    # не помог). Принудительный сброс перед следующим документом.
+                    _reset_to_list()
             except Exception as e:
                 log.error(f"ОШИБКА документ {i}: {e}")
                 err += 1
-                # Возврат в список — обновим страницу
-                try:
-                    driver.get(url)
-                    _wait_profile_loaded(driver)
-                    switch_account(driver,
-                        settings.get("target_account", cfg.DEFAULTS["target_account"]))
-                    click_sidebar_section(driver,
-                        settings.get("sidebar_section", cfg.DEFAULTS["sidebar_section"]))
-                except Exception:
-                    pass
+                _reset_to_list()
 
         elapsed_seconds = time.monotonic() - start_time
         elapsed = timedelta(seconds=int(elapsed_seconds))
