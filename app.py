@@ -47,12 +47,13 @@ log = logging.getLogger("asud.app")
 
 
 _MODE_DESCRIPTIONS = {
-    'mix':         'Создание + регистрация + На резолюцию + .msg по Link',
-    'auto-create': 'Создание + регистрация + На резолюцию (без .msg)',
-    'smart':       'Создание как черновик + .msg (без регистрации, фикс. корреспондент)',
-    'email':       'Создание прямо из .msg-писем (без xlsx-реестра)',
+    'mix':           'Создание + регистрация + На резолюцию + .msg по Link',
+    'auto-create':   'Создание + регистрация + На резолюцию (без .msg)',
+    'smart':         'Создание как черновик + .msg (без регистрации, фикс. корреспондент)',
+    'email':         'Создание прямо из .msg-писем (без xlsx-реестра)',
+    'zhkh-complete': 'Только второй проход ГИСЖКХ (восстановление: Басманов → резолюции по реестру)',
 }
-_MODES = ['mix', 'auto-create', 'smart', 'email']
+_MODES = ['mix', 'auto-create', 'smart', 'email', 'zhkh-complete']
 
 
 def detect_mode(xlsx_path):
@@ -184,6 +185,16 @@ def main():
     else:
         # Ничего не указано — спрашиваем
         source = pick_source()
+
+    # === ZHKH-COMPLETE (восстановление второго прохода) =====================
+    if args.mode == 'zhkh-complete':
+        log.info("Режим: zhkh-complete (только второй проход)")
+        if args.xlsx:
+            os.environ['ASUD_XLSX'] = args.xlsx
+        os.environ['ASUD_MODE'] = 'zhkh-complete'
+        from flows.zhkh_complete import main as flow_main
+        flow_main()
+        return
 
     # === EMAIL-источник =====================================================
     if source == 'email':

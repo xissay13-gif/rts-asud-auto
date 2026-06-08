@@ -18,6 +18,7 @@ flows/zhkh_complete.py — Второй проход для ГИСЖКХ-пре�
 """
 
 import os
+import sys
 import logging
 
 import openpyxl
@@ -195,3 +196,138 @@ def complete_resolutions(driver, docs=None, xlsx_path=None,
         switch_account(driver, switch_back_to)
 
     return done, failed
+
+
+# ================= STANDALONE RUN =================
+
+def main():
+    """Восстановительный запуск второго прохода: открыть Edge, дождаться
+    логина, выдать резолюции по реестру ГИСЖКХ.
+
+    Используется когда первый проход (email-flow) уже завершился (все письма
+    зарегистрированы), но второй проход прервался — например, компьютер ушёл
+    в спящий режим. `_process_one` молча пропускает документы, которых уже
+    нет в сайдбаре «На резолюцию», поэтому повторный запуск безопасен:
+    добьёт только недоделанные.
+
+    Путь к xlsx берётся из ASUD_XLSX env или argv[1] или интерактивно из
+    Registered/. Драйвер пути и логин — как в остальных flow'ах.
+    """
+    from selenium import webdriver
+    from selenium.webdriver.edge.service import Service as EdgeService
+
+    from shared import config as cfg
+    from shared.ui import wait_asud_loaded, set_driver_timeout
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%H:%M:%S',
+        handlers=[logging.StreamHandler()],
+    )
+
+    settings = cfg.load()
+    cfg.setup_file_logger("zhkh_complete")
+    cfg.keep_system_awake(True)
+
+    log.info("=" * 50)
+    log.info("АСУД ИК — ZHKH-COMPLETE (восстановление второго прохода)")
+    log.info("=" * 50)
+
+    base_dir = cfg.get_base_dir()
+
+    # Путь к xlsx
+    xlsx_path = os.environ.get('ASUD_XLSX') or (sys.argv[1] if len(sys.argv) > 1 else None)
+    if not xlsx_path:
+        registered_dir = os.path.join(base_dir, "Registered")
+        candidates = []
+        if os.path.isdir(registered_dir):
+            candidates = sorted(
+                [f for f in os.listdir(registered_dir)
+                 if f.lower().endswith('.xlsx')
+                 and 'гисжкх' in f.lower()
+                 and not f.startswith('~')],
+                reverse=True,
+            )
+        if candidates:
+            print("\nРеестры ГИСЖКХ в Registered/ (свежие сверху):")
+            for i, name in enumerate(candidates[:10], 1):
+                print(f"  {i}. {name}")
+            print(f"[Enter] = 1")
+            choice = input(f"Номер (1-{min(10, len(candidates))}) или путь: ").strip().strip('"').strip("'")
+            if not choice:
+                xlsx_path = os.path.join(registered_dir, candidates[0])
+            elif choice.isdigit():
+                try:
+                    xlsx_path = os.path.join(registered_dir, candidates[int(choice) - 1])
+                except IndexError:
+                    log.error(f"Неверный номер: {choice}")
+                    sys.exit(1)
+            else:
+                xlsx_path = choice
+        else:
+            xlsx_path = input("\nПуть к ГИСЖКХ-реестру: ").strip().strip('"').strip("'")
+
+    if not xlsx_path or not os.path.isfile(xlsx_path):
+        log.error(f"Реестр не найден: {xlsx_path!r}")
+        input("Enter...")
+        sys.exit(1)
+
+    log.info(f"Реестр: {xlsx_path}")
+
+    # Браузер
+    driver_path = os.path.join(base_dir, "msedgedriver.exe")
+    if not os.path.exists(driver_path):
+        log.error(f"msedgedriver.exe не найден в {base_dir}")
+        input("Enter...")
+        sys.exit(1)
+
+    options = cfg.build_edge_options()
+    service = EdgeService(executable_path=driver_path)
+    driver = webdriver.Edge(service=service, options=options)
+    set_driver_timeout(driver, settings.get("asud_load_timeout_sec",
+                                              cfg.DEFAULTS["asud_load_timeout_sec"]))
+    try:
+        url = settings.get("asud_url", cfg.DEFAULTS["asud_url"])
+        log.info(f"Открываю {url}")
+        driver.get(url)
+        wait_asud_loaded(driver)
+
+        switch_to    = settings.get("zhkh_complete_user", "Басманов")
+        switch_back  = settings.get("zhkh_initial_user", "")
+        sidebar      = settings.get("zhkh_sidebar_section",
+                                     cfg.DEFAULTS["zhkh_sidebar_section"])
+        executor     = settings.get("zhkh_executor_fio",
+                                     cfg.DEFAULTS["zhkh_executor_fio"])
+        content_tpl  = settings.get("zhkh_content_template",
+                                     cfg.DEFAULTS["zhkh_content_template"])
+        req_report   = settings.get("zhkh_require_report",
+                                     cfg.DEFAULTS["zhkh_require_report"])
+        ctrl_res     = settings.get("zhkh_control_resolution",
+                                     cfg.DEFAULTS["zhkh_control_resolution"])
+        fb_days      = settings.get("zhkh_fallback_days",
+                                     cfg.DEFAULTS["zhkh_fallback_days"])
+
+        complete_resolutions(driver, xlsx_path=xlsx_path,
+                             switch_to=switch_to,
+                             switch_back_to=switch_back,
+                             sidebar_section=sidebar,
+                             executor_fio=executor,
+                             content_template=content_tpl,
+                             require_report=req_report,
+                             control_resolution=ctrl_res,
+                             fallback_days=fb_days)
+        input("\nEnter для закрытия...")
+    except Exception as e:
+        log.error(f"Ошибка: {e}")
+        input("Enter...")
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        cfg.keep_system_awake(False)
+
+
+if __name__ == "__main__":
+    main()
