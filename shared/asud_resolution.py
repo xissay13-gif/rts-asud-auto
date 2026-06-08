@@ -529,8 +529,15 @@ def click_create_resolution(driver, timeout=10):
 
 
 def select_content_template(driver, template_text):
-    """Выбирает в поле 'Содержание' пункт из выпадашки."""
+    """Выбирает в поле 'Содержание' пункт из выпадашки шаблонов.
+
+    По HTML-дампу каждый пункт в раскрытой выпадашке — это
+    <div data-marker="<template_text>"><...></div>. Это надёжнее
+    text-match'а — не путается с другими элементами с тем же текстом
+    в DOM (например, в зарегистрированных карточках).
+    """
     try:
+        # 1. Клик в поле «Содержание» чтобы раскрыть выпадашку
         inp = None
         candidates = driver.find_elements(By.CSS_SELECTOR,
             "input[placeholder='Общие формулировки']")
@@ -543,16 +550,19 @@ def select_content_template(driver, template_text):
         if not inp:
             log.error("Поле 'Содержание' не найдено")
             return False
-
         click(driver, inp, "Содержание")
+
+        # 2. Ждём появления элемента выпадашки с нужным data-marker'ом
+        target_xpath = f"//div[@data-marker={_xpath_lit(template_text)}]"
         try:
             WebDriverWait(driver, 5).until(
-                lambda d: any(it.is_displayed() for it in d.find_elements(
-                    By.XPATH, f"//*[normalize-space(text())='{template_text}']")))
+                lambda d: any(e.is_displayed() for e in d.find_elements(By.XPATH, target_xpath)))
         except Exception:
-            log.debug("Дропдаун 'Содержание' не появился за 5s")
-        items = driver.find_elements(By.XPATH,
-            f"//*[normalize-space(text())='{template_text}']")
+            # Fallback: старый поиск по text-match (вдруг новый АСУД без data-marker'ов)
+            log.debug(f"Не нашёл по data-marker '{template_text}', пробую по тексту")
+            target_xpath = f"//*[normalize-space(text())={_xpath_lit(template_text)}]"
+
+        items = driver.find_elements(By.XPATH, target_xpath)
         target = None
         for it in items:
             try:
@@ -562,7 +572,7 @@ def select_content_template(driver, template_text):
             except Exception:
                 continue
         if not target:
-            log.error(f"Пункт '{template_text}' в выпадашке не найден")
+            log.error(f"Пункт '{template_text}' в выпадашке 'Содержание' не найден")
             return False
         click(driver, target, f"Содержание: {template_text}")
         time.sleep(0.5)
@@ -570,6 +580,17 @@ def select_content_template(driver, template_text):
     except Exception as e:
         log.error(f"Ошибка выбора содержания: {e}")
         return False
+
+
+def _xpath_lit(s):
+    """Безопасно квотит строку для XPath (учитывая возможные апострофы/кавычки)."""
+    if "'" not in s:
+        return f"'{s}'"
+    if '"' not in s:
+        return f'"{s}"'
+    # Содержит и ', и " — собираем через concat
+    parts = s.split("'")
+    return "concat(" + ", \"'\", ".join(f"'{p}'" for p in parts) + ")"
 
 
 def _wait_data_value(driver, container, target_value="true", timeout=5):
