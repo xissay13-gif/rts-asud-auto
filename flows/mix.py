@@ -1021,11 +1021,22 @@ def create_one_document(driver, doc_data, index, total):
     wait_and_click(driver, By.XPATH,
         "//div[contains(text(),'Входящий документ')]", "Входящий документ")
 
-    # [3/7] Вид
+    # [3/7] Вид — приоритет по стабильному id (полное название = id).
+    # По HTML-дампу: <div id="Письма, заявления и жалобы граждан, акционеров">...</div>
+    # Fallback — text-search по короткому префиксу как раньше.
     subtype = doc_data.get("тип_название", "Письма, заявления и жалобы граждан, акционеров")
-    short = subtype[:30]
-    wait_and_click(driver, By.XPATH,
-        f"//div[contains(text(),'{short}')] | //td[contains(text(),'{short}')]", subtype)
+    type_clicked = False
+    try:
+        el = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.ID, subtype)))
+        click(driver, el, f"тип: {subtype}")
+        type_clicked = True
+    except Exception:
+        log.debug(f"Тип по id '{subtype}' не найден, fallback на text-search")
+    if not type_clicked:
+        short = subtype[:30]
+        wait_and_click(driver, By.XPATH,
+            f"//div[contains(text(),'{short}')] | //td[contains(text(),'{short}')]", subtype)
 
     wait_and_click(driver, By.XPATH,
         "//button[contains(text(),'Создать документ')] | //div[contains(text(),'Создать документ')]",
