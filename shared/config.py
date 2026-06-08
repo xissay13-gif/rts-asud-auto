@@ -186,20 +186,71 @@ def build_edge_options():
     return options
 
 
+import threading
+
+_keep_awake_thread = None
+_keep_awake_stop = threading.Event()
+
+
+def _keep_awake_heartbeat():
+    """Фоновый daemon-поток: раз в 30с переподтверждает SetThreadExecutionState.
+    Без heartbeat'а флаг иногда «забывался» если основной поток долго висел
+    внутри Selenium-операции (особенно на корпоративных лэптопах с агрессивной
+    энергосберегайкой). Демон сам умирает при выходе процесса."""
+    import ctypes
+    ES_CONTINUOUS = 0x80000000
+    ES_SYSTEM_REQUIRED = 0x00000001
+    ES_DISPLAY_REQUIRED = 0x00000002
+    flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+    while not _keep_awake_stop.wait(30):
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(flags)
+        except Exception:
+            break
+
+
 def keep_system_awake(enabled=True):
     """Блокирует/разблокирует Windows-таймер автосна на время процесса.
+
+    Флаги:
+      ES_CONTINUOUS        — постоянный (а не одноразовый) запрос
+      ES_SYSTEM_REQUIRED   — не уходить в системный сон/гибернацию
+      ES_DISPLAY_REQUIRED  — дополнительно не отключать дисплей. Часто
+                              сильнее ловит overzealous энергосбережение
+                              на корпоративных машинах, где одного
+                              ES_SYSTEM_REQUIRED бывает недостаточно
+
+    Дополнительно поднимает daemon-поток, который переподтверждает запрос
+    каждые 30 секунд (некоторые версии Windows сбрасывали флаг при долгих
+    блокирующих операциях).
+
     На Linux/macOS — no-op. Реверт автоматический при выходе процесса
     (можно явно вызвать с enabled=False).
     """
+    global _keep_awake_thread
     if not sys.platform.startswith('win'):
         return
+    log = logging.getLogger("asud")
     try:
         import ctypes
         ES_CONTINUOUS = 0x80000000
         ES_SYSTEM_REQUIRED = 0x00000001
-        flags = (ES_CONTINUOUS | ES_SYSTEM_REQUIRED) if enabled else ES_CONTINUOUS
-        ctypes.windll.kernel32.SetThreadExecutionState(flags)
+        ES_DISPLAY_REQUIRED = 0x00000002
         if enabled:
-            logging.getLogger("asud").info("Сон Windows заблокирован на время работы")
+            flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+            ctypes.windll.kernel32.SetThreadExecutionState(flags)
+            log.info("Сон Windows и таймер дисплея заблокированы (+heartbeat 30с)")
+            if _keep_awake_thread is None or not _keep_awake_thread.is_alive():
+                _keep_awake_stop.clear()
+                _keep_awake_thread = threading.Thread(
+                    target=_keep_awake_heartbeat,
+                    daemon=True,
+                    name="keep-awake-hb",
+                )
+                _keep_awake_thread.start()
+        else:
+            _keep_awake_stop.set()
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+            log.info("Сон Windows разблокирован")
     except Exception as e:
-        logging.getLogger("asud").debug(f"keep_system_awake не сработал: {e}")
+        log.debug(f"keep_system_awake не сработал: {e}")
