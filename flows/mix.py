@@ -150,17 +150,24 @@ def _output_xlsx_path(excel_path):
 
 
 def _ensure_output_xlsx(path):
-    """Создаёт output xlsx с шапкой если не существует."""
+    """Создаёт output xlsx с шапкой если не существует.
+
+    Последние 2 колонки заполняются позже: «Отписано Халецкой» — если этот
+    реестр обрабатывается ГИСЖКХ-вторым проходом (Басманов→Халецкая);
+    «Отписано в округ» — после clean-resolutions (Халецкая→окружные).
+    """
     if os.path.isfile(path):
         return
     try:
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Резолюции"
-        ws.append(["ОПТС", "Округ", "ФИО", "Link"])
-        for c in range(1, 5):
+        headers = ["ОПТС", "Округ", "ФИО", "Link",
+                   "Отписано Халецкой", "Отписано в округ"]
+        ws.append(headers)
+        for c in range(1, len(headers) + 1):
             ws.cell(row=1, column=c).font = openpyxl.styles.Font(bold=True)
-        widths = {1: 30, 2: 8, 3: 35, 4: 22}
+        widths = {1: 30, 2: 8, 3: 35, 4: 22, 5: 18, 6: 18}
         for col, w in widths.items():
             ws.column_dimensions[
                 openpyxl.utils.get_column_letter(col)].width = w

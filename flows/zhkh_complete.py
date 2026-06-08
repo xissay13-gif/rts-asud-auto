@@ -30,6 +30,7 @@ from shared.asud_resolution import (
     fill_executor, click_add_btn, submit_resolution,
     click_complete_button, close_card_after_complete, clear_filter,
 )
+from shared.xlsx_status import mark_status, get_done_asud_ids, COL_HALETSKAYA
 
 log = logging.getLogger("asud")
 
@@ -53,7 +54,11 @@ def _read_asud_ids(xlsx_path):
 
 def _process_one(driver, doc, idx, total, executor_fio, content_template,
                   require_report, control_resolution, fallback_days):
-    """Один документ: открыть → резолюция → исполнитель → завершить."""
+    """Один документ: открыть → резолюция → исполнитель → завершить.
+
+    После успеха — пишет дату в колонку «Отписано Халецкой» реестра
+    (doc['xlsx_path'], если есть).
+    """
     asud_id = doc['asud_id']
     planned = doc.get('planned_date')
     log.info(f"--- [{idx}/{total}] {asud_id} (планируемая: {planned}) ---")
@@ -113,6 +118,12 @@ def _process_one(driver, doc, idx, total, executor_fio, content_template,
     # 12. Закрытие карточки (safety net)
     close_card_after_complete(driver)
 
+    # Пометка статуса в реестре (если xlsx известен)
+    xlsx_path = doc.get('xlsx_path')
+    if xlsx_path:
+        if mark_status(xlsx_path, asud_id, COL_HALETSKAYA):
+            log.debug(f"  {asud_id}: помечен в xlsx «{COL_HALETSKAYA}»")
+
     log.info(f"  {asud_id}: ✓ завершён")
     return True
 
@@ -150,8 +161,31 @@ def complete_resolutions(driver, docs=None, xlsx_path=None,
         log.warning("Список документов пуст — нечего обрабатывать")
         return
 
+    # Прокидываем xlsx_path в каждый doc — нужно для отметки статуса
+    # (если doc уже содержит свой xlsx_path — оставляем; например при
+    # параллельных датах в реестрах).
+    if xlsx_path:
+        for d in docs:
+            d.setdefault('xlsx_path', xlsx_path)
+
+    # Skip-already-done: если в реестре уже стоит дата в «Отписано Халецкой»
+    # — пропускаем (повторный запуск после crash/сна не дублирует отписки).
+    skipped_done = 0
+    if xlsx_path:
+        already = get_done_asud_ids(xlsx_path, COL_HALETSKAYA)
+        if already:
+            before = len(docs)
+            docs = [d for d in docs if d.get('asud_id') not in already]
+            skipped_done = before - len(docs)
+            if skipped_done:
+                log.info(f"Пропускаю {skipped_done} уже отписанных (есть отметка в «{COL_HALETSKAYA}»)")
+            if not docs:
+                log.info("Все документы из реестра уже отписаны — нечего делать")
+                return 0, 0
+
     log.info("=" * 60)
-    log.info(f"ZHKH-COMPLETE: второй проход ({len(docs)} документов)")
+    log.info(f"ZHKH-COMPLETE: второй проход ({len(docs)} документов"
+             + (f", +{skipped_done} skipped" if skipped_done else "") + ")")
     log.info(f"  исполнитель:  {executor_fio}")
     log.info(f"  содержание:   {content_template}")
     log.info(f"  тогглы:       отчёт={require_report}, контрольная={control_resolution}")

@@ -109,8 +109,12 @@ def _msg_link(msg, file_path):
 # ================= PER-DATE XLSX REGISTRY =================
 
 # Колонки реестра (под per-date).
-_REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body"]
-_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 80}
+# Последние 2 колонки заполняются позже: «Отписано Халецкой» — после второго
+# прохода ГИСЖКХ (Басманов → Халецкая); «Отписано в округ» — после прогона
+# clean-resolutions (Халецкая → окружные начальницы).
+_REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body",
+                     "Отписано Халецкой", "Отписано в округ"]
+_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 80, 6: 18, 7: 18}
 
 
 def _dated_xlsx_path(base_dir, date_prefix, suffix=None):
@@ -343,6 +347,7 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
     in_daemon=True (mix-режим): DRAFT → перенос в Черновики/.
     """
     msg_path = doc.get("файл")
+    written_xlsx = None  # путь к xlsx куда записали (для второго прохода)
 
     if process_mode == "smart":
         # Smart-пресет: каждый .msg создаётся как черновик с фикс. корреспондентом
@@ -354,10 +359,10 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
     status = mix_flow._last_result.get("status", "FAILED")
 
     if status == "OK":
-        xlsx_path = _dated_xlsx_path(base_dir, doc.get("msg_date_prefix"),
-                                      output_suffix)
-        _ensure_dated_xlsx(xlsx_path)
-        _append_dated_row(xlsx_path, doc, asud_id)
+        written_xlsx = _dated_xlsx_path(base_dir, doc.get("msg_date_prefix"),
+                                          output_suffix)
+        _ensure_dated_xlsx(written_xlsx)
+        _append_dated_row(written_xlsx, doc, asud_id)
         move_to_done(msg_path, folder)
     elif status == "DUPLICATE":
         log.info(f"Документ {index}: уже зарегистрирован — .msg в Завершено/")
@@ -366,10 +371,10 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
         if process_mode == "smart":
             # Smart: черновик — это нормальный исход. Пишем в реестр (без АСУД-ID)
             # и переносим .msg в Завершено/.
-            xlsx_path = _dated_xlsx_path(base_dir, doc.get("msg_date_prefix"),
-                                          output_suffix)
-            _ensure_dated_xlsx(xlsx_path)
-            _append_dated_row(xlsx_path, doc, asud_id or "")
+            written_xlsx = _dated_xlsx_path(base_dir, doc.get("msg_date_prefix"),
+                                              output_suffix)
+            _ensure_dated_xlsx(written_xlsx)
+            _append_dated_row(written_xlsx, doc, asud_id or "")
             move_to_done(msg_path, folder)
             log.info(f"Документ {index}: создан как черновик (smart) — .msg в Завершено/")
         elif in_daemon:
@@ -379,7 +384,7 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
     else:  # FAILED — caller сам решает что делать (retry / move-to-errors)
         pass
 
-    return status, asud_id
+    return status, asud_id, written_xlsx
 
 
 # ================= MAIN =================
@@ -477,21 +482,26 @@ def main():
         log.info(f"Per-date реестры в: {os.path.join(base_dir, 'Registered')}")
 
         done_count, dup_count, draft_count, err_count = 0, 0, 0, 0
-        # Для ZHKH-второго прохода: собираем dict'ы с asud_id + planned_date
+        # Для ZHKH-второго прохода: собираем dict'ы с asud_id + planned_date + xlsx
         registered_docs = []
+        primary_xlsx = None  # для отметки «Отписано Халецкой» из второго прохода
         for i, doc in enumerate(docs, 1):
             msg_path = doc.get("файл")
             try:
-                status, asud_id = _process_doc(driver, doc, base_dir, folder,
+                status, asud_id, written_xlsx = _process_doc(
+                                       driver, doc, base_dir, folder,
                                        i, len(docs), in_daemon=False,
                                        process_mode=process_mode,
                                        output_suffix=output_suffix)
+                if written_xlsx:
+                    primary_xlsx = written_xlsx
                 if status == "OK":
                     done_count += 1
                     if asud_id:
                         registered_docs.append({
                             'asud_id': asud_id,
                             'planned_date': doc.get('планируемая_дата'),
+                            'xlsx_path': written_xlsx,
                         })
                 elif status == "DUPLICATE":
                     dup_count += 1
@@ -565,6 +575,7 @@ def main():
                   f"выдаю резолюции для {len(registered_docs)} документов...")
             try:
                 complete_resolutions(driver, docs=registered_docs,
+                                     xlsx_path=primary_xlsx,
                                      switch_to=switch_to,
                                      switch_back_to=switch_back,
                                      sidebar_section=sidebar,
@@ -702,7 +713,8 @@ def daemon_main():
                     continue
 
                 try:
-                    status, _asud_id = _process_doc(driver, doc, base_dir, folder,
+                    status, _asud_id, _xlsx = _process_doc(
+                                           driver, doc, base_dir, folder,
                                            idx, len(queue), in_daemon=True,
                                            process_mode=process_mode,
                                            output_suffix=output_suffix)
