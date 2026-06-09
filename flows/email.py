@@ -32,6 +32,7 @@ from shared.attachments import move_to_done, move_to_errors, move_to_drafts
 from shared.colors import green, yellow, red, status_colored
 from shared.classifier import classify_doc_type
 from shared.zhkh_parser import parse_zhkh_body
+from shared.feedback_parser import parse_feedback_body
 
 # Переиспользуем создание/регистрацию/output из mix
 from flows import mix as mix_flow
@@ -251,6 +252,10 @@ def _parse_one_msg(msg_path, process_mode="mix"):
     # ГИС ЖКХ — спец-парсер табличного body. Запускаем ДО классификатора —
     # для ZHKH-писем тип всегда 8 (письма граждан), классификатор не трогаем.
     zhkh = parse_zhkh_body(body)
+    # Feedback с сайта Омск РТС («Новый вопрос с сайта Омск РТС») — структурный
+    # парсер. ФИО заявителя указано явно в теле → авто-регистрация, не черновик.
+    # Парсим ТОЛЬКО если не ZHKH (zhkh > feedback по приоритету).
+    feedback = None if zhkh else parse_feedback_body(body, subject=subject)
 
     force_draft = False
     if zhkh:
@@ -258,6 +263,11 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         type_idx = 8
         log.info(f"{os.path.basename(msg_path)}: ГИС ЖКХ → {zhkh['фио']}, "
                  f"№{zhkh.get('номер_обращения')} от {zhkh.get('дата_обращения')}")
+    elif feedback:
+        # Feedback-письмо: тип 8 (письма граждан), регистрация а не черновик
+        type_idx = 8
+        log.info(f"{os.path.basename(msg_path)}: feedback Омск РТС → "
+                 f"{feedback['фио']}, ЛС {feedback.get('лицевой_счет') or '—'}")
     elif process_mode == "smart":
         # Не ZHKH: для smart-режима пускаем общий классификатор
         type_idx = classify_doc_type(body)
@@ -285,6 +295,10 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         corr_found = True
         fio_src = "zhkh"
         # ZHKH-парсер уже нашёл ФИО, force_draft гарантированно False
+    elif feedback:
+        correspondent = feedback['фио']
+        corr_found = True
+        fio_src = "feedback"
     elif force_draft:
         # Smart + cat-0: принудительно черновик с фикс. корреспондентом
         # (чтобы письмо точно ушло в DRAFT-ветку mix.create_one_document).
@@ -302,9 +316,9 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         log.warning(f"okrug_parser упал для {os.path.basename(msg_path)}: {e}")
         okrug = None
 
-    # Для ZHKH-писем краткое содержание в АСУД = тема письма (subject),
-    # а не полный body (там длинный табличный текст с подписью).
-    if zhkh:
+    # Для ZHKH и feedback-писем краткое содержание в АСУД = тема (subject),
+    # а не полный body (там длинный шаблонный текст с подписью).
+    if zhkh or feedback:
         soderzhanie = clean_subject
     else:
         soderzhanie = body_clean
@@ -380,8 +394,10 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
     msg_path = doc.get("файл")
     written_xlsx = None  # путь к xlsx куда записали (для второго прохода)
 
-    if process_mode == "smart":
-        # Smart-пресет: каждый .msg создаётся как черновик с фикс. корреспондентом
+    if process_mode == "smart" and doc.get("корр_источник") not in ("zhkh", "feedback"):
+        # Smart-пресет: каждый .msg создаётся как черновик с фикс. корреспондентом.
+        # Исключение — структурно распознанные письма (ZHKH / feedback): у них
+        # ФИО заявителя в теле явно, оно надёжное → пускаем в регистрацию.
         doc["корр_найден"] = False
         doc["корреспондент"] = settings.get("unknown_correspondent",
                                              cfg.DEFAULTS["unknown_correspondent"])
