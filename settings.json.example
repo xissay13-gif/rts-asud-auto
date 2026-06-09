@@ -45,5 +45,21 @@
   "zhkh_content_template": "Для работы",
   "zhkh_require_report": true,
   "zhkh_control_resolution": true,
-  "zhkh_fallback_days": 3
+  "zhkh_fallback_days": 3,
+
+  "_comment_zhkh_daemon": "Конфиг непрерывного daemon'а под Басмановым (mode=zhkh-daemon). Опрашивает реестры в каждые poll_interval_sec секунд, для новых строк (Номер заполнен, «Отписано Халецкой» пуст) выдаёт резолюцию Халецкой и отмечает дату.",
+  "zhkh_daemon": {
+    "watch": [
+      {"dir": "D:\\OutlookSubjects\\ГИСЖКХ", "xlsx_pattern": "*_ГИСЖКХ_резолюции.xlsx"},
+      {"dir": "D:\\OutlookSubjects\\ТЭС",    "xlsx_pattern": "*_ТЭС_резолюции.xlsx"}
+    ],
+    "poll_interval_sec": 30,
+    "switch_to_user": "Басманов",
+    "sidebar_section": "На резолюцию",
+    "executor_fio": "Халецкая Юлия Владимировна",
+    "content_template": "Для работы",
+    "require_report": true,
+    "control_resolution": true,
+    "fallback_days": 3
+  }
 }

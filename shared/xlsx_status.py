@@ -19,6 +19,8 @@ from datetime import date
 
 import openpyxl
 
+from shared.xlsx_lock import xlsx_lock
+
 log = logging.getLogger("asud")
 
 COL_HALETSKAYA = "Отписано Халецкой"
@@ -89,6 +91,23 @@ def mark_status(xlsx_path, asud_id, column_name, value=None):
     if value is None:
         value = date.today().strftime("%d.%m.%Y")
     try:
+        with xlsx_lock(xlsx_path):
+            return _mark_status_locked(xlsx_path, asud_id, column_name, value)
+    except TimeoutError as e:
+        log.warning(f"mark_status({asud_id}, {column_name}): {e}")
+        return False
+    except PermissionError as e:
+        log.warning(f"mark_status({asud_id}, {column_name}): xlsx занят "
+                    f"(возможно, открыт в Excel): {e}")
+        return False
+    except Exception as e:
+        log.warning(f"mark_status({asud_id}, {column_name}): {e}")
+        return False
+
+
+def _mark_status_locked(xlsx_path, asud_id, column_name, value):
+    """Внутренняя часть mark_status — выполняется уже под lock'ом."""
+    try:
         wb = openpyxl.load_workbook(xlsx_path)
         ws = wb.active
         headers = [str(c.value or '').strip() for c in next(ws.iter_rows(max_row=1))]
@@ -123,6 +142,6 @@ def mark_status(xlsx_path, asud_id, column_name, value=None):
         wb.save(xlsx_path)
         wb.close()
         return True
-    except Exception as e:
-        log.warning(f"mark_status({asud_id}, {column_name}): {e}")
-        return False
+    except Exception:
+        # caller (mark_status) ловит и логирует
+        raise

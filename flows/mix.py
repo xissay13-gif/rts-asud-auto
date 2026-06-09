@@ -210,11 +210,13 @@ def _append_output_row(path, doc_data, asud_id, status="OK"):
         "DUPLICATE": f"Дубликат {ts}",
     }.get(status, f"{status} {ts}")
     try:
-        wb = openpyxl.load_workbook(path)
-        ws = wb.active
-        ws.append([asud_id or "", okrug or "", fio or "", link_str, status_text])
-        wb.save(path)
-        wb.close()
+        from shared.xlsx_lock import xlsx_lock
+        with xlsx_lock(path, timeout=60):
+            wb = openpyxl.load_workbook(path)
+            ws = wb.active
+            ws.append([asud_id or "", okrug or "", fio or "", link_str, status_text])
+            wb.save(path)
+            wb.close()
         log.info(f"  → {os.path.basename(path)}: "
                  f"{asud_id or '—'} | {okrug or '—'} | {fio or '—'}")
     except Exception as e:

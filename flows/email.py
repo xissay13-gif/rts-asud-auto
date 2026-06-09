@@ -33,6 +33,7 @@ from shared.colors import green, yellow, red, status_colored
 from shared.classifier import classify_doc_type
 from shared.zhkh_parser import parse_zhkh_body
 from shared.feedback_parser import parse_feedback_body
+from shared.xlsx_lock import xlsx_lock
 
 # Переиспользуем создание/регистрацию/output из mix
 from flows import mix as mix_flow
@@ -187,17 +188,18 @@ def _append_dated_row(path, doc, asud_id, status="OK"):
         "DUPLICATE": f"Дубликат {ts}",
     }.get(status, f"{status} {ts}")
     try:
-        wb = openpyxl.load_workbook(path)
-        ws = wb.active
-        ws.append([
-            asud_id or "",
-            doc.get("link") or "",
-            doc.get("округ_прогноз") or "",
-            doc.get("тема") or "",
-            doc.get("содержание") or "",  # уже _clean_body
-            status_text,
-        ])
-        wb.save(path)
+        with xlsx_lock(path, timeout=60):
+            wb = openpyxl.load_workbook(path)
+            ws = wb.active
+            ws.append([
+                asud_id or "",
+                doc.get("link") or "",
+                doc.get("округ_прогноз") or "",
+                doc.get("тема") or "",
+                doc.get("содержание") or "",  # уже _clean_body
+                status_text,
+            ])
+            wb.save(path)
     except Exception as e:
         log.warning(f"Не удалось записать строку в {path}: {e}")
 
