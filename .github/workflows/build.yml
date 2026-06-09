@@ -20,9 +20,15 @@ jobs:
     - name: Install dependencies
       run: pip install selenium openpyxl pyinstaller extract-msg colorama
 
-    - name: Build EXE
+    # Onedir вместо onefile: exe не распаковывает себя в %TEMP% при запуске,
+    # KAV почти не срабатывает с PDM:Trojan.Win32.Generic. --noupx — без
+    # UPX-упаковки (тоже триггер для AV). Структура:
+    #   dist/asud/
+    #     asud.exe
+    #     _internal/  (DLL и Python-runtime)
+    - name: Build EXE (onedir)
       run: >
-        pyinstaller --onefile --name asud
+        pyinstaller --onedir --name asud --noupx
         --add-data "addresses.csv;."
         --hidden-import=selenium.webdriver.edge.webdriver
         --hidden-import=selenium.webdriver.edge.service
@@ -52,20 +58,25 @@ jobs:
         --hidden-import=shared.xlsx_status
         app.py
 
+    # Копируем launchers и template настроек прямо в папку asud/
+    # — чтобы пользователь после распаковки ZIP мог сразу запускать .bat
+    # из той же папки где лежит asud.exe.
     - name: Copy launchers + settings template
+      shell: pwsh
       run: |
-        copy asud_headless.bat dist\
-        copy asud_email_watch.bat dist\
-        copy asud_auto_create_headless.bat dist\
-        copy settings.json.example dist\
+        Copy-Item asud_headless.bat dist\asud\ -ErrorAction SilentlyContinue
+        Copy-Item asud_email_watch.bat dist\asud\ -ErrorAction SilentlyContinue
+        Copy-Item asud_auto_create_headless.bat dist\asud\ -ErrorAction SilentlyContinue
+        Copy-Item asud_zhkh_daemon.bat dist\asud\ -ErrorAction SilentlyContinue
+        Copy-Item settings.json.example dist\asud\ -ErrorAction SilentlyContinue
+
+    - name: Zip dist folder
+      shell: pwsh
+      run: |
+        Compress-Archive -Path dist/asud/* -DestinationPath dist/asud.zip -Force
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: asud
-        path: |
-          dist/asud.exe
-          dist/asud_headless.bat
-          dist/asud_email_watch.bat
-          dist/asud_auto_create_headless.bat
-          dist/settings.json.example
+        path: dist/asud.zip
