@@ -152,9 +152,10 @@ def _output_xlsx_path(excel_path):
 def _ensure_output_xlsx(path):
     """Создаёт output xlsx с шапкой если не существует.
 
-    Последние 2 колонки заполняются позже: «Отписано Халецкой» — если этот
-    реестр обрабатывается ГИСЖКХ-вторым проходом (Басманов→Халецкая);
-    «Отписано в округ» — после clean-resolutions (Халецкая→окружные).
+    Колонки 1-4 — данные документа, 5 — статус/дата обработки,
+    6-7 — заполняются позже: «Отписано Халецкой» (Басманов→Халецкая,
+    второй проход ГИСЖКХ); «Отписано в округ» (Халецкая→окружные,
+    clean-resolutions).
     """
     if os.path.isfile(path):
         return
@@ -162,12 +163,12 @@ def _ensure_output_xlsx(path):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Резолюции"
-        headers = ["ОПТС", "Округ", "ФИО", "Link",
+        headers = ["ОПТС", "Округ", "ФИО", "Link", "Статус",
                    "Отписано Халецкой", "Отписано в округ"]
         ws.append(headers)
         for c in range(1, len(headers) + 1):
             ws.cell(row=1, column=c).font = openpyxl.styles.Font(bold=True)
-        widths = {1: 30, 2: 8, 3: 35, 4: 22, 5: 18, 6: 18}
+        widths = {1: 30, 2: 8, 3: 35, 4: 22, 5: 28, 6: 18, 7: 18}
         for col, w in widths.items():
             ws.column_dimensions[
                 openpyxl.utils.get_column_letter(col)].width = w
@@ -177,9 +178,14 @@ def _ensure_output_xlsx(path):
         log.warning(f"Не удалось создать {path}: {e}")
 
 
-def _append_output_row(path, doc_data, asud_id):
-    """Дописывает строку в output xlsx после успешной регистрации.
-    Колонки: ОПТС | Округ | ФИО | Link
+def _append_output_row(path, doc_data, asud_id, status="OK"):
+    """Дописывает строку в output xlsx после обработки документа.
+    Колонки: ОПТС | Округ | ФИО | Link | Статус
+
+    status:
+      OK        → «Зарегистрирован DD.MM.YYYY HH:MM»
+      DRAFT     → «Черновик DD.MM.YYYY HH:MM»
+      DUPLICATE → «Дубликат DD.MM.YYYY HH:MM»
     """
     # Округ — пытаемся определить автоматически из TextBody
     okrug = None
@@ -197,10 +203,16 @@ def _append_output_row(path, doc_data, asud_id):
             link_str = link.strftime("%d.%m.%Y %H-%M-%S")
         else:
             link_str = str(link)
+    ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+    status_text = {
+        "OK":        f"Зарегистрирован {ts}",
+        "DRAFT":     f"Черновик {ts}",
+        "DUPLICATE": f"Дубликат {ts}",
+    }.get(status, f"{status} {ts}")
     try:
         wb = openpyxl.load_workbook(path)
         ws = wb.active
-        ws.append([asud_id or "", okrug or "", fio or "", link_str])
+        ws.append([asud_id or "", okrug or "", fio or "", link_str, status_text])
         wb.save(path)
         wb.close()
         log.info(f"  → {os.path.basename(path)}: "
@@ -1287,7 +1299,7 @@ def main():
                     processed.add(key)
                     save_state(excel_path, processed)
                 # Запись в output xlsx (даже если asud_id не захватили — ставим Link)
-                _append_output_row(output_path, doc, asud_id)
+                _append_output_row(output_path, doc, asud_id, status="OK")
                 done_count += 1
             except Exception as e:
                 log.error(f"ОШИБКА документ {i}: {e}")

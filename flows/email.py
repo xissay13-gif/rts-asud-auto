@@ -116,12 +116,12 @@ def _msg_link(msg, file_path):
 # ================= PER-DATE XLSX REGISTRY =================
 
 # Колонки реестра (под per-date).
-# Последние 2 колонки заполняются позже: «Отписано Халецкой» — после второго
-# прохода ГИСЖКХ (Басманов → Халецкая); «Отписано в округ» — после прогона
-# clean-resolutions (Халецкая → окружные начальницы).
-_REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body",
+# Колонки 1-5 — данные документа, 6 — статус/дата обработки, 7-8 —
+# заполняются позже («Отписано Халецкой» — после второго прохода ГИСЖКХ,
+# «Отписано в округ» — после прогона clean-resolutions).
+_REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body", "Статус",
                      "Отписано Халецкой", "Отписано в округ"]
-_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 80, 6: 18, 7: 18}
+_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 80, 6: 28, 7: 18, 8: 18}
 
 
 def _dated_xlsx_path(base_dir, date_prefix, suffix=None):
@@ -158,10 +158,21 @@ def _ensure_dated_xlsx(path):
         log.warning(f"Не удалось создать {path}: {e}")
 
 
-def _append_dated_row(path, doc, asud_id):
+def _append_dated_row(path, doc, asud_id, status="OK"):
     """Дописывает строку в per-date xlsx.
-    Колонки: Номер | Link | Округ | Subject | Body
+    Колонки: Номер | Link | Округ | Subject | Body | Статус | ...
+
+    status — internal код результата обработки. В xlsx пишем человекочитаемо:
+      OK        → «Зарегистрирован DD.MM.YYYY HH:MM»
+      DRAFT     → «Черновик DD.MM.YYYY HH:MM»
+      DUPLICATE → «Дубликат DD.MM.YYYY HH:MM»
     """
+    ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+    status_text = {
+        "OK":        f"Зарегистрирован {ts}",
+        "DRAFT":     f"Черновик {ts}",
+        "DUPLICATE": f"Дубликат {ts}",
+    }.get(status, f"{status} {ts}")
     try:
         wb = openpyxl.load_workbook(path)
         ws = wb.active
@@ -171,6 +182,7 @@ def _append_dated_row(path, doc, asud_id):
             doc.get("округ_прогноз") or "",
             doc.get("тема") or "",
             doc.get("содержание") or "",  # уже _clean_body
+            status_text,
         ])
         wb.save(path)
     except Exception as e:
@@ -369,7 +381,7 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
         written_xlsx = _dated_xlsx_path(base_dir, doc.get("msg_date_prefix"),
                                           output_suffix)
         _ensure_dated_xlsx(written_xlsx)
-        _append_dated_row(written_xlsx, doc, asud_id)
+        _append_dated_row(written_xlsx, doc, asud_id, status="OK")
         move_to_done(msg_path, folder)
     elif status == "DUPLICATE":
         log.info(f"Документ {index}: уже зарегистрирован — .msg в Завершено/")
@@ -381,7 +393,7 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
             written_xlsx = _dated_xlsx_path(base_dir, doc.get("msg_date_prefix"),
                                               output_suffix)
             _ensure_dated_xlsx(written_xlsx)
-            _append_dated_row(written_xlsx, doc, asud_id or "")
+            _append_dated_row(written_xlsx, doc, asud_id or "", status="DRAFT")
             move_to_done(msg_path, folder)
             log.info(f"Документ {index}: создан как черновик (smart) — .msg в Завершено/")
         elif in_daemon:
