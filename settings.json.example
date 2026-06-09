@@ -41,7 +41,8 @@
   "zhkh_daemon": {
     "watch": [
       {"dir": "D:\\OutlookSubjects\\ГИСЖКХ", "xlsx_pattern": "ГИСЖКХ_резолюции.xlsx"},
-      {"dir": "D:\\OutlookSubjects\\ТЭС",    "xlsx_pattern": "ТЭС_резолюции.xlsx"}
+      {"dir": "D:\\OutlookSubjects\\ТЭС",    "xlsx_pattern": "ТЭС_резолюции.xlsx"},
+      {"dir": "D:\\OutlookSubjects\\ОЭК",    "xlsx_pattern": "ОЭК_резолюции.xlsx"}
     ],
     "poll_interval_sec": 30,
     "switch_to_user": "Басманов",
