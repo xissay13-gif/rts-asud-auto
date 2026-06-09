@@ -37,6 +37,7 @@ from shared.asud_resolution import (
     set_stage_date_explicit, compute_control_date,
     fill_executor, click_add_btn, submit_resolution,
     click_complete_button, close_card_after_complete, clear_filter,
+    _account_active,
 )
 
 logging.basicConfig(
@@ -216,6 +217,43 @@ def _process_one(driver, doc, executor_fio, content_template,
     return True
 
 
+# ================= SESSION HEARTBEAT =================
+
+HEARTBEAT_INTERVAL_SEC = 300  # каждые 5 минут проверяем не разлогинило ли
+
+
+def _session_alive(driver, expected_user):
+    """Проверяет что в шапке всё ещё видна нужная учётка. Использует
+    _account_active с коротким таймаутом — если шапки нет, скорее всего
+    нас разлогинило (АСУД редиректит на login-страницу)."""
+    try:
+        return _account_active(driver, expected_user, timeout=3)
+    except Exception:
+        return False
+
+
+def _relogin(driver, url, switch_to, sidebar):
+    """Полный re-login: открыть АСУД заново → переключить учётку → сайдбар.
+    Используется когда _session_alive отдал False (idle/timeout разлогинил).
+    Возвращает True если успешно восстановили сессию.
+    """
+    log.warning(f"Heartbeat: сессия с '{switch_to}' потерялась — переподключаюсь")
+    try:
+        driver.get(url)
+        wait_asud_loaded(driver)
+    except Exception as e:
+        log.error(f"Re-login: driver.get упал: {e}")
+        return False
+    if not switch_account(driver, switch_to):
+        log.error(f"Re-login: switch_account на '{switch_to}' не сработал")
+        return False
+    if not click_sidebar_section(driver, sidebar):
+        log.error(f"Re-login: sidebar '{sidebar}' не открылся")
+        return False
+    log.info("Heartbeat: сессия восстановлена")
+    return True
+
+
 # ================= DAEMON LOOP =================
 
 def main():
@@ -291,9 +329,21 @@ def main():
         # Кэш mtime: xlsx_path → last seen mtime. Если файл не менялся
         # с прошлой итерации, повторно не читаем (оптимизация).
         mtime_cache = {}
+        last_heartbeat = time.monotonic()
 
         while not _stop_flag:
             iters += 1
+
+            # Heartbeat-проверка сессии каждые HEARTBEAT_INTERVAL_SEC секунд.
+            # Если АСУД разлогинило за idle/timeout — пробуем переподключиться.
+            if time.monotonic() - last_heartbeat > HEARTBEAT_INTERVAL_SEC:
+                if not _session_alive(driver, switch_to):
+                    if not _relogin(driver, url, switch_to, sidebar):
+                        log.error("Heartbeat: re-login не удался, sleep + retry")
+                        _interruptible_sleep(60)
+                        continue
+                last_heartbeat = time.monotonic()
+
             xlsx_paths = _list_watched_xlsx(watch_list)
             if not xlsx_paths:
                 log.info(f"[итер. {iters}] нет xlsx ни в одной watch-папке — sleep {poll_interval}с")

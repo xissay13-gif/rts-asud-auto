@@ -121,9 +121,10 @@ def _msg_link(msg, file_path):
 # Колонки 1-5 — данные документа, 6 — статус/дата обработки, 7-8 —
 # заполняются позже («Отписано Халецкой» — после второго прохода ГИСЖКХ,
 # «Отписано в округ» — после прогона clean-resolutions).
-_REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body", "Статус",
+_REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body",
+                     "Планируемая дата", "Статус",
                      "Отписано Халецкой", "Отписано в округ"]
-_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 80, 6: 28, 7: 18, 8: 18}
+_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 80, 6: 16, 7: 28, 8: 18, 9: 18}
 
 
 def _xlsx_path(base_dir, suffix=None, target_folder=None):
@@ -179,10 +180,15 @@ def _ensure_dated_xlsx(path):
 
 
 def _append_dated_row(path, doc, asud_id, status="OK"):
-    """Дописывает строку в per-date xlsx.
-    Колонки: Номер | Link | Округ | Subject | Body | Статус | ...
+    """Дописывает строку в накопительный xlsx.
 
-    status — internal код результата обработки. В xlsx пишем человекочитаемо:
+    Адаптивен к схеме файла: читает шапку, выбирает значения по именам
+    колонок. Если в xlsx нет какой-то колонки (например, старый файл
+    без «Планируемая дата») — её просто пропускаем. Если в xlsx новая
+    колонка которой нет в этой функции — пишем пусто. Обратная
+    совместимость гарантирована.
+
+    status — internal код результата обработки. В колонку «Статус» пишем:
       OK        → «Зарегистрирован DD.MM.YYYY HH:MM»
       DRAFT     → «Черновик DD.MM.YYYY HH:MM»
       DUPLICATE → «Дубликат DD.MM.YYYY HH:MM»
@@ -193,18 +199,26 @@ def _append_dated_row(path, doc, asud_id, status="OK"):
         "DRAFT":     f"Черновик {ts}",
         "DUPLICATE": f"Дубликат {ts}",
     }.get(status, f"{status} {ts}")
+
+    # Знакомые колонки → значения. ЛЮБОЕ имя колонки в шапке xlsx, которое
+    # есть в этом словаре, будет заполнено. Остальные останутся пустыми.
+    values = {
+        "Номер":             asud_id or "",
+        "Link":              doc.get("link") or "",
+        "Округ":             doc.get("округ_прогноз") or "",
+        "Subject":           doc.get("тема") or "",
+        "Body":              doc.get("содержание") or "",  # уже _clean_body
+        "Планируемая дата":  doc.get("планируемая_дата") or "",
+        "Статус":            status_text,
+    }
     try:
         with xlsx_lock(path, timeout=60):
             wb = openpyxl.load_workbook(path)
             ws = wb.active
-            ws.append([
-                asud_id or "",
-                doc.get("link") or "",
-                doc.get("округ_прогноз") or "",
-                doc.get("тема") or "",
-                doc.get("содержание") or "",  # уже _clean_body
-                status_text,
-            ])
+            # Шапка существующего файла
+            headers = [str(c.value or '').strip() for c in next(ws.iter_rows(max_row=1))]
+            row = [values.get(h, "") for h in headers]
+            ws.append(row)
             wb.save(path)
     except Exception as e:
         log.warning(f"Не удалось записать строку в {path}: {e}")
