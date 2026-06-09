@@ -822,20 +822,25 @@ def register_and_resolve(driver, index, total):
     click(driver, res_btn, "На резолюцию")
 
     # Да — сразу опрашиваем DOM, sleep не нужен (внутри цикла уже есть time.sleep(1) между попытками)
+    # По HTML-дампу id кнопки = `confirm-dialog-btn-yes` (дефисы, не подчёркивания).
     yes_btn = None
     for _ in range(10):
-        # 1) Точный id
-        try:
-            btn = driver.find_element(By.ID, "confirm_dialog_btn_yes")
-            if btn.is_displayed():
-                yes_btn = btn
-                break
-        except Exception:
-            pass
+        # 1) Точные id (новый с дефисами + старый с подчёркиваниями fallback)
+        for sel in ("confirm-dialog-btn-yes", "confirm_dialog_btn_yes"):
+            try:
+                btn = driver.find_element(By.ID, sel)
+                if btn.is_displayed():
+                    yes_btn = btn
+                    break
+            except Exception:
+                continue
+        if yes_btn:
+            break
         # 2) Substring id (GWT может добавлять префиксы/суффиксы)
         try:
             btn = driver.find_element(By.CSS_SELECTOR,
-                "[id*='confirm_dialog_btn_yes'], [id*='confirm'][id*='yes']")
+                "[id*='confirm-dialog-btn-yes'], [id*='confirm_dialog_btn_yes'],"
+                " [id*='confirm'][id*='yes']")
             if btn.is_displayed():
                 yes_btn = btn
                 break
@@ -857,15 +862,17 @@ def register_and_resolve(driver, index, total):
         # Helper: re-find yes_btn freshly чтобы обойти stale element после
         # перерисовки GXT-диалога между нашими click-стратегиями.
         def _refind_yes():
-            try:
-                b = driver.find_element(By.ID, "confirm_dialog_btn_yes")
-                if b.is_displayed():
-                    return b
-            except Exception:
-                pass
+            for sel in ("confirm-dialog-btn-yes", "confirm_dialog_btn_yes"):
+                try:
+                    b = driver.find_element(By.ID, sel)
+                    if b.is_displayed():
+                        return b
+                except Exception:
+                    continue
             try:
                 b = driver.find_element(By.CSS_SELECTOR,
-                    "[id*='confirm_dialog_btn_yes'], [id*='confirm'][id*='yes']")
+                    "[id*='confirm-dialog-btn-yes'], [id*='confirm_dialog_btn_yes'],"
+                    " [id*='confirm'][id*='yes']")
                 if b.is_displayed():
                     return b
             except Exception:

@@ -857,20 +857,36 @@ def wait_button_enabled(driver, btn_id, timeout=15):
 
 
 def click_confirm_yes(driver, timeout=10):
-    """Ждёт и кликает 'Да' в confirm-диалоге АСУД (с fallback'ами)."""
+    """Ждёт и кликает 'Да' в confirm-диалоге АСУД.
+
+    Стабильные id из HTML-дампа:
+      confirm-dialog          — контейнер диалога
+      confirm-dialog-btn-yes  — кнопка «Да»
+      confirm-dialog-btn-no   — кнопка «Нет»
+
+    Раньше код искал по `confirm_dialog_btn_yes` (с подчёркиваниями)
+    — это никогда не находилось, прога всегда падала на text-search «Да»,
+    что иногда цепляло лишние элементы.
+
+    Fallback'и оставлены на случай если будущий АСУД сменит схему id.
+    """
     yes_btn = None
     end = time.monotonic() + timeout
     while time.monotonic() < end:
-        try:
-            btn = driver.find_element(By.ID, "confirm_dialog_btn_yes")
-            if btn.is_displayed():
-                yes_btn = btn
-                break
-        except Exception:
-            pass
+        for selector in ("confirm-dialog-btn-yes", "confirm_dialog_btn_yes"):
+            try:
+                btn = driver.find_element(By.ID, selector)
+                if btn.is_displayed():
+                    yes_btn = btn
+                    break
+            except Exception:
+                continue
+        if yes_btn:
+            break
         try:
             btn = driver.find_element(By.CSS_SELECTOR,
-                "[id*='confirm_dialog_btn_yes'], [id*='confirm'][id*='yes']")
+                "[id*='confirm-dialog-btn-yes'], [id*='confirm_dialog_btn_yes'],"
+                " [id*='confirm'][id*='yes']")
             if btn.is_displayed():
                 yes_btn = btn
                 break
