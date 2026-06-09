@@ -26,6 +26,10 @@ DEFAULTS = {
     # email-daemon (--watch)
     "email_watch_interval_sec": 30,
     "email_max_retries": 3,
+    # Если True — обработанные .msg удаляются вместо переноса в Завершено/.
+    # Удобно для непрерывного daemon-режима, чтобы папка не разрасталась.
+    # Можно переопределить per-preset (поле delete_after_done в preset).
+    "delete_after_done": False,
     # Таймаут загрузки страниц ASUD (page_load + urllib3 client). 300с = 5 минут.
     # Поднят с дефолтных 120с т.к. ASUD иногда долго инициализируется.
     "asud_load_timeout_sec": 300,

@@ -1,7 +1,7 @@
 {
   "_comment": "Шаблон settings.json. Скопируй и переименуй в settings.json рядом с asud.exe — exe подхватит без пересборки. Любой ключ можно убрать — будет взято значение по умолчанию из DEFAULTS в коде. config.json (старое имя) тоже работает — для обратной совместимости.",
 
-  "_comment_presets": "Каждый пресет — отдельный сценарий в меню при запуске asud.exe без флагов. Поля: name (как показать), mode (mix/smart/auto-create/email), folder (источник .msg для email-flow), xlsx (путь к реестру для mix/auto-create/smart), outlook_dir (папка где искать .msg по Link для mix-вложений; может совпадать с folder или нет), output_suffix (добавляется в имя per-date xlsx чтобы не конфликтовали реестры разных пресетов).",
+  "_comment_presets": "Каждый пресет — отдельный сценарий в меню при запуске asud.exe без флагов. Поля: name (как показать), mode (mix/smart/auto-create/email), folder (источник .msg для email-flow), xlsx (путь к реестру для mix/auto-create/smart), outlook_dir (папка где искать .msg по Link для mix-вложений; может совпадать с folder или нет), output_suffix (добавляется в имя per-date xlsx чтобы не конфликтовали реестры разных пресетов), delete_after_done (true → удалять обработанные .msg вместо переноса в Завершено/; удобно для daemon-режима).",
   "presets": [
     {
       "name": "ОЭК — Smart (черновики)",
@@ -9,7 +9,8 @@
       "folder": "D:\\OutlookSubjects\\ОЭК",
       "xlsx": "D:\\OutlookSubjects\\ОЭК\\ОЭК.xlsx",
       "outlook_dir": "D:\\OutlookSubjects\\ОЭК",
-      "output_suffix": "ОЭК"
+      "output_suffix": "ОЭК",
+      "delete_after_done": true
     },
     {
       "name": "ТЭС — Mix (с регистрацией)",
@@ -17,7 +18,8 @@
       "folder": "D:\\OutlookSubjects\\ТЭС",
       "xlsx": "D:\\OutlookSubjects\\ТЭС\\ТЭС.xlsx",
       "outlook_dir": "D:\\OutlookSubjects\\ТЭС",
-      "output_suffix": "ТЭС"
+      "output_suffix": "ТЭС",
+      "delete_after_done": true
     },
     {
       "name": "ГИС ЖКХ — Mix (с регистрацией)",

@@ -135,16 +135,36 @@ def get_dummy_msg(base_dir):
     return None
 
 
-def move_to_done(file_path, outlook_dir, done_dirname="Завершено"):
-    """Перемещает обработанный .msg в <outlook_dir>/Завершено/.
-    Папка создаётся если нет. Конфликт имён → суффикс _HHMMSS.
-    Ничего не делает если file_path пустой/не существует.
+def move_to_done(file_path, outlook_dir, done_dirname="Завершено", delete=None):
+    """Завершает работу с обработанным .msg.
+
+    delete — режим финализации:
+      None (default) → читать из env ASUD_DELETE_AFTER_DONE ('1' = удалять)
+      True  → удалить файл
+      False → переместить в <outlook_dir>/Завершено/
+
+    Если delete=True или env='1' — файл удаляется. Иначе переезжает в
+    Завершено/ (как раньше). Папка создаётся если нет. Конфликт имён → _HHMMSS.
     """
     if not file_path or not os.path.isfile(file_path):
         return
+
+    if delete is None:
+        delete = os.environ.get('ASUD_DELETE_AFTER_DONE', '0') == '1'
+
+    name = os.path.basename(file_path)
+
+    if delete:
+        try:
+            os.remove(file_path)
+            log.info(f"× удалён: {name}")
+        except Exception as e:
+            log.warning(f"Не удалось удалить {name}: {e}")
+        return
+
     if not outlook_dir or not os.path.isdir(outlook_dir):
         log.warning(f"outlook_dir '{outlook_dir}' не существует — "
-                    f"не перемещаю {os.path.basename(file_path)}")
+                    f"не перемещаю {name}")
         return
 
     done_dir = os.path.join(outlook_dir, done_dirname)
@@ -154,7 +174,6 @@ def move_to_done(file_path, outlook_dir, done_dirname="Завершено"):
         log.warning(f"Не удалось создать {done_dir}: {e}")
         return
 
-    name = os.path.basename(file_path)
     dest = os.path.join(done_dir, name)
     if os.path.exists(dest):
         base, ext = os.path.splitext(name)

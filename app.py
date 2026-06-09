@@ -152,6 +152,9 @@ def main():
     # Иначе fallback на старое поведение (интерактивный выбор источника).
     settings_data = cfg.load()
     presets = settings_data.get("presets") or []
+    # Глобальный flag delete_after_done (если есть в settings.json) тоже подхватываем
+    if settings_data.get("delete_after_done"):
+        os.environ.setdefault('ASUD_DELETE_AFTER_DONE', '1')
     no_flags = not (args.mode or args.xlsx or args.folder)
     if no_flags and presets:
         preset = pick_preset(presets)
@@ -178,6 +181,10 @@ def main():
         # реестров при параллельных запусках двух .bat).
         if preset.get("output_suffix"):
             os.environ['ASUD_OUTPUT_SUFFIX'] = preset["output_suffix"]
+        # delete_after_done — удалять обработанные .msg вместо переноса в
+        # Завершено/. Удобно для непрерывного daemon-режима.
+        if preset.get("delete_after_done"):
+            os.environ['ASUD_DELETE_AFTER_DONE'] = '1'
 
     # === Определяем источник: email vs xlsx =================================
     if args.folder or args.mode == 'email':
