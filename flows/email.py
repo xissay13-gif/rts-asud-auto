@@ -549,9 +549,9 @@ def main():
         log.info(f"Per-date реестры в: {os.path.join(base_dir, 'Registered')}")
 
         done_count, dup_count, draft_count, err_count = 0, 0, 0, 0
-        # Для ZHKH-второго прохода: собираем dict'ы с asud_id + planned_date + xlsx
+        # Просто счётчик зарегистрированных ГИСЖКХ — для итогового лога.
+        # Сама отписка делается отдельным процессом (asud_zhkh_daemon.bat).
         registered_docs = []
-        primary_xlsx = None  # для отметки «Отписано Халецкой» из второго прохода
         for i, doc in enumerate(docs, 1):
             msg_path = doc.get("файл")
             try:
@@ -560,16 +560,10 @@ def main():
                                        i, len(docs), in_daemon=False,
                                        process_mode=process_mode,
                                        output_suffix=output_suffix)
-                if written_xlsx:
-                    primary_xlsx = written_xlsx
                 if status == "OK":
                     done_count += 1
                     if asud_id:
-                        registered_docs.append({
-                            'asud_id': asud_id,
-                            'planned_date': doc.get('планируемая_дата'),
-                            'xlsx_path': written_xlsx,
-                        })
+                        registered_docs.append(asud_id)
                 elif status == "DUPLICATE":
                     dup_count += 1
                 elif status == "DRAFT":
@@ -620,39 +614,13 @@ def main():
         print(f"  Затрачено:    {elapsed}" + (f"  (в среднем {avg}/док)" if avg else ""))
         print("=" * 60)
 
-        # ZHKH-второй проход: переключиться на Басманова, нажать «Завершить»
-        # по каждому из только что зарегистрированных документов
+        # Раньше тут запускался ZHKH-второй проход (Басманов → резолюции
+        # Халецкой). Теперь это отдельный процесс — zhkh_daemon, который
+        # читает xlsx-реестр и отписывает в фоне.
+        # Запускается отдельно: asud_zhkh_daemon.bat
         if output_suffix == "ГИСЖКХ" and registered_docs:
-            from flows.zhkh_complete import complete_resolutions
-            switch_to    = settings.get("zhkh_complete_user", "Басманов")
-            switch_back  = settings.get("zhkh_initial_user", "")
-            sidebar      = settings.get("zhkh_sidebar_section",
-                                         cfg.DEFAULTS["zhkh_sidebar_section"])
-            executor     = settings.get("zhkh_executor_fio",
-                                         cfg.DEFAULTS["zhkh_executor_fio"])
-            content_tpl  = settings.get("zhkh_content_template",
-                                         cfg.DEFAULTS["zhkh_content_template"])
-            req_report   = settings.get("zhkh_require_report",
-                                         cfg.DEFAULTS["zhkh_require_report"])
-            ctrl_res     = settings.get("zhkh_control_resolution",
-                                         cfg.DEFAULTS["zhkh_control_resolution"])
-            fb_days      = settings.get("zhkh_fallback_days",
-                                         cfg.DEFAULTS["zhkh_fallback_days"])
-            print(f"\nВторой проход: переключаюсь на «{switch_to}», "
-                  f"выдаю резолюции для {len(registered_docs)} документов...")
-            try:
-                complete_resolutions(driver, docs=registered_docs,
-                                     xlsx_path=primary_xlsx,
-                                     switch_to=switch_to,
-                                     switch_back_to=switch_back,
-                                     sidebar_section=sidebar,
-                                     executor_fio=executor,
-                                     content_template=content_tpl,
-                                     require_report=req_report,
-                                     control_resolution=ctrl_res,
-                                     fallback_days=fb_days)
-            except Exception as e:
-                log.error(f"ZHKH-второй проход упал: {e}")
+            log.info(f"Зарегистрировано {len(registered_docs)} ГИСЖКХ-документов. "
+                     f"Для отписки запусти asud_zhkh_daemon.bat (или он уже работает фоном).")
 
         input("\nEnter для закрытия...")
     except Exception as e:
