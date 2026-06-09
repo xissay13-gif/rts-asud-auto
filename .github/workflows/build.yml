@@ -20,15 +20,12 @@ jobs:
     - name: Install dependencies
       run: pip install selenium openpyxl pyinstaller extract-msg colorama
 
-    # Onedir вместо onefile: exe не распаковывает себя в %TEMP% при запуске,
-    # KAV почти не срабатывает с PDM:Trojan.Win32.Generic. --noupx — без
-    # UPX-упаковки (тоже триггер для AV). Структура:
-    #   dist/registration/
-    #     registration.exe
-    #     _internal/  (DLL и Python-runtime)
-    - name: Build EXE (onedir)
+    # Onefile: один registration.exe + батники. KAV ругается одинаково
+    # на onedir и onefile (поведенческий детектор), так что смысла дробить
+    # на папку нет — храним удобный single-exe.
+    - name: Build EXE (onefile)
       run: >
-        pyinstaller --onedir --name registration --noupx
+        pyinstaller --onefile --name registration
         --add-data "addresses.csv;."
         --hidden-import=selenium.webdriver.edge.webdriver
         --hidden-import=selenium.webdriver.edge.service
@@ -58,22 +55,23 @@ jobs:
         --hidden-import=shared.xlsx_status
         app.py
 
-    # Копируем launchers и template настроек прямо в папку registration/
-    # — чтобы пользователь после распаковки ZIP мог сразу запускать .bat
-    # из той же папки где лежит registration.exe.
-    - name: Copy launchers + settings template
+    # Складываем exe + .bat + settings template в одну плоскую папку,
+    # пакуем в ZIP. Пользователь распаковывает → всё рядом.
+    - name: Stage release files
       shell: pwsh
       run: |
-        Copy-Item asud_headless.bat dist\registration\ -ErrorAction SilentlyContinue
-        Copy-Item asud_email_watch.bat dist\registration\ -ErrorAction SilentlyContinue
-        Copy-Item asud_auto_create_headless.bat dist\registration\ -ErrorAction SilentlyContinue
-        Copy-Item asud_zhkh_daemon.bat dist\registration\ -ErrorAction SilentlyContinue
-        Copy-Item settings.json.example dist\registration\ -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path dist\release -Force | Out-Null
+        Copy-Item dist\registration.exe dist\release\
+        Copy-Item asud_headless.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item asud_email_watch.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item asud_auto_create_headless.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item asud_zhkh_daemon.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item settings.json.example dist\release\ -ErrorAction SilentlyContinue
 
-    - name: Zip dist folder
+    - name: Zip release
       shell: pwsh
       run: |
-        Compress-Archive -Path dist/registration/* -DestinationPath dist/registration.zip -Force
+        Compress-Archive -Path dist/release/* -DestinationPath dist/registration.zip -Force
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
