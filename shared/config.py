@@ -47,30 +47,38 @@ DEFAULTS = {
     "zhkh_require_report": True,
     "zhkh_control_resolution": True,
     "zhkh_fallback_days": 3,
-    # Пресеты сценариев — список словарей с name + mode + folder.
-    # Зашиты дефолтные пути для ОЭК (smart) и ТЭС (mix). Чтобы переопределить
-    # без пересборки — создать settings.json рядом с exe (см. settings.json.example).
-    # output_suffix — добавляется в имя реестра, чтобы при параллельном
-    # запуске двух пресетов файлы не конфликтовали:
-    #   Registered/2026-05-12_ОЭК_резолюции.xlsx
-    #   Registered/2026-05-12_ТЭС_резолюции.xlsx
+    # Пресеты сценариев — список словарей. Поля:
+    #   name          — отображение в меню
+    #   mode          — 'mix' / 'smart' / 'auto-create' / 'email'
+    #   folder        — источник .msg-писем для email-flow
+    #   xlsx          — путь к реестру для mix/auto-create/smart (опциональный)
+    #   outlook_dir   — папка где искать .msg по Link для mix-вложений
+    #                    (опциональный; если не задан — спрашиваем интерактивно)
+    #   output_suffix — добавляется в имя per-date реестра, чтобы
+    #                    Registered/2026-05-12_ОЭК_резолюции.xlsx и
+    #                    Registered/2026-05-12_ТЭС_резолюции.xlsx не конфликтовали.
+    # Чтобы переопределить без пересборки — создать settings.json или
+    # config.json рядом с exe (см. settings.json.example).
     "presets": [
         {
             "name": "ОЭК — Smart (черновики)",
             "mode": "smart",
             "folder": "D:\\OutlookSubjects\\ОЭК",
+            "outlook_dir": "D:\\OutlookSubjects\\ОЭК",
             "output_suffix": "ОЭК",
         },
         {
             "name": "ТЭС — Mix (с регистрацией)",
             "mode": "mix",
             "folder": "D:\\OutlookSubjects\\ТЭС",
+            "outlook_dir": "D:\\OutlookSubjects\\ТЭС",
             "output_suffix": "ТЭС",
         },
         {
             "name": "ГИС ЖКХ — Mix (с регистрацией)",
             "mode": "mix",
             "folder": "D:\\OutlookSubjects\\ГИСЖКХ",
+            "outlook_dir": "D:\\OutlookSubjects\\ГИСЖКХ",
             "output_suffix": "ГИСЖКХ",
         },
     ],
@@ -97,17 +105,28 @@ def get_base_dir():
 
 
 def load():
-    """Загружает config.json, мержит с дефолтами."""
+    """Загружает config.json + settings.json, мержит с дефолтами.
+
+    Порядок применения (поздние перекрывают ранние):
+      1. DEFAULTS (зашиты в код)
+      2. config.json (legacy, для обратной совместимости)
+      3. settings.json (рекомендуемый)
+
+    Можно использовать любой из двух файлов рядом с exe. Если оба
+    присутствуют — settings.json побеждает.
+    """
     cfg = dict(DEFAULTS)
-    path = os.path.join(get_base_dir(), "config.json")
-    if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                user_cfg = json.load(f)
-            cfg.update(user_cfg)
-            log.info(f"Конфиг загружен: {path}")
-        except Exception as e:
-            log.warning(f"Ошибка чтения config.json: {e}, используем дефолты")
+    base = get_base_dir()
+    for fname in ("config.json", "settings.json"):
+        path = os.path.join(base, fname)
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    user_cfg = json.load(f)
+                cfg.update(user_cfg)
+                log.info(f"Конфиг загружен: {path}")
+            except Exception as e:
+                log.warning(f"Ошибка чтения {fname}: {e}, пропускаем")
     return cfg
 
 

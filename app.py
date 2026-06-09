@@ -164,6 +164,13 @@ def main():
             args.folder = preset["folder"]
         if preset.get("mode"):
             args.mode = preset["mode"]
+        # xlsx из пресета — авто-подстановка реестра для mix/auto-create/smart
+        if preset.get("xlsx") and not args.xlsx:
+            args.xlsx = preset["xlsx"]
+        # outlook_dir из пресета — папка с .msg для mix-вложений (по Link).
+        # Пробрасываем через env, mix.main() прочитает.
+        if preset.get("outlook_dir"):
+            os.environ['ASUD_OUTLOOK_DIR'] = preset["outlook_dir"]
         # ASUD_EMAIL_PROCESS_MODE — для email-flow: 'mix' (текущая логика) или
         # 'smart' (всегда черновик + фикс. корреспондент).
         os.environ['ASUD_EMAIL_PROCESS_MODE'] = preset.get("mode", "mix")
