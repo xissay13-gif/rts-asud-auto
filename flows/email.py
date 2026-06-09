@@ -126,23 +126,23 @@ _REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body", "С�
 _REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 80, 6: 28, 7: 18, 8: 18}
 
 
-def _dated_xlsx_path(base_dir, date_prefix, suffix=None, target_folder=None):
-    """Путь к per-date реестру.
+def _xlsx_path(base_dir, suffix=None, target_folder=None):
+    """Путь к накопительному реестру (один файл, все записи append'ятся).
+
+    Раньше был per-date (<YYYY-MM-DD>_<suffix>_резолюции.xlsx) — на каждый день
+    свой файл. Теперь один файл-накопитель: <suffix>_резолюции.xlsx. Так удобнее:
+      • daemon мониторит один файл, не glob
+      • вся история в одном месте, фильтр в Excel по дате через колонку «Статус»
+      • меньше мусора в папке
 
     Куда кладём:
-      • Если target_folder задан И существует — прямо в эту папку
-        (рядом с .msg-файлами). Это поведение по умолчанию для email-flow:
-        отчёт лежит рядом с письмами, удобно работать с ним вручную.
+      • Если target_folder задан И существует — прямо туда (рядом с .msg).
       • Иначе — fallback на <base_dir>/Registered/ (легаси).
 
-    Без suffix: <where>/YYYY-MM-DD_резолюции.xlsx
-    С suffix:   <where>/YYYY-MM-DD_<suffix>_резолюции.xlsx
-    Если date_prefix=None → _unknown_<...>.xlsx (fallback).
+    Без suffix: <where>/резолюции.xlsx
+    С suffix:   <where>/<suffix>_резолюции.xlsx
     """
-    name = date_prefix or "_unknown"
-    if suffix:
-        name += f"_{suffix}"
-    name += "_резолюции.xlsx"
+    name = f"{suffix}_резолюции.xlsx" if suffix else "резолюции.xlsx"
 
     if target_folder and os.path.isdir(target_folder):
         return os.path.join(target_folder, name)
@@ -150,6 +150,12 @@ def _dated_xlsx_path(base_dir, date_prefix, suffix=None, target_folder=None):
     registered_dir = os.path.join(base_dir, "Registered")
     os.makedirs(registered_dir, exist_ok=True)
     return os.path.join(registered_dir, name)
+
+
+# Backward-compat alias — старое имя ещё может встречаться в каком-то коде.
+def _dated_xlsx_path(base_dir, date_prefix, suffix=None, target_folder=None):
+    """DEPRECATED: используй _xlsx_path. date_prefix теперь игнорируется."""
+    return _xlsx_path(base_dir, suffix=suffix, target_folder=target_folder)
 
 
 def _ensure_dated_xlsx(path):
@@ -408,8 +414,7 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
     status = mix_flow._last_result.get("status", "FAILED")
 
     if status == "OK":
-        written_xlsx = _dated_xlsx_path(base_dir, doc.get("msg_date_prefix"),
-                                          output_suffix, target_folder=folder)
+        written_xlsx = _xlsx_path(base_dir, output_suffix, target_folder=folder)
         _ensure_dated_xlsx(written_xlsx)
         _append_dated_row(written_xlsx, doc, asud_id, status="OK")
         move_to_done(msg_path, folder)
@@ -420,8 +425,7 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
         if process_mode == "smart":
             # Smart: черновик — это нормальный исход. Пишем в реестр (без АСУД-ID)
             # и переносим .msg в Завершено/.
-            written_xlsx = _dated_xlsx_path(base_dir, doc.get("msg_date_prefix"),
-                                              output_suffix, target_folder=folder)
+            written_xlsx = _xlsx_path(base_dir, output_suffix, target_folder=folder)
             _ensure_dated_xlsx(written_xlsx)
             _append_dated_row(written_xlsx, doc, asud_id or "", status="DRAFT")
             move_to_done(msg_path, folder)

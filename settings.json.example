@@ -47,11 +47,11 @@
   "zhkh_control_resolution": true,
   "zhkh_fallback_days": 3,
 
-  "_comment_zhkh_daemon": "Конфиг непрерывного daemon'а под Басмановым (mode=zhkh-daemon). Опрашивает реестры в каждые poll_interval_sec секунд, для новых строк (Номер заполнен, «Отписано Халецкой» пуст) выдаёт резолюцию Халецкой и отмечает дату.",
+  "_comment_zhkh_daemon": "Конфиг непрерывного daemon'а под Басмановым (mode=zhkh-daemon). Опрашивает реестры в каждые poll_interval_sec секунд, для новых строк (Номер заполнен, «Отписано Халецкой» пуст) выдаёт резолюцию Халецкой и отмечает дату. Имена реестров: <output_suffix>_резолюции.xlsx (один накопительный файл на пресет, без даты в имени). Дата регистрации каждой записи лежит в колонке «Статус» внутри xlsx.",
   "zhkh_daemon": {
     "watch": [
-      {"dir": "D:\\OutlookSubjects\\ГИСЖКХ", "xlsx_pattern": "*_ГИСЖКХ_резолюции.xlsx"},
-      {"dir": "D:\\OutlookSubjects\\ТЭС",    "xlsx_pattern": "*_ТЭС_резолюции.xlsx"}
+      {"dir": "D:\\OutlookSubjects\\ГИСЖКХ", "xlsx_pattern": "ГИСЖКХ_резолюции.xlsx"},
+      {"dir": "D:\\OutlookSubjects\\ТЭС",    "xlsx_pattern": "ТЭС_резолюции.xlsx"}
     ],
     "poll_interval_sec": 30,
     "switch_to_user": "Басманов",
