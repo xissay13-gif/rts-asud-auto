@@ -166,9 +166,9 @@ def _list_watched_xlsx(watch_list):
 
 def _process_one(driver, doc, executor_fio, content_template,
                   require_report, control_resolution, fallback_days):
-    """Обработка одного документа (как в zhkh_complete._process_one).
-    Возвращает True если резолюция выдана, False если skip/fail.
-    """
+    """Обработка одного документа: находит в списке, выдаёт резолюцию
+    Халецкой и «Завершить». Возвращает True если резолюция выдана,
+    False если skip/fail."""
     asud_id = doc['asud_id']
     planned = doc.get('planned_date')
     log.info(f"--- {asud_id} (планируемая: {planned}) ---")

@@ -33,24 +33,6 @@ DEFAULTS = {
     # Таймаут загрузки страниц ASUD (page_load + urllib3 client). 300с = 5 минут.
     # Поднят с дефолтных 120с т.к. ASUD иногда долго инициализируется.
     "asud_load_timeout_sec": 300,
-    # ZHKH-второй проход (после ГИСЖКХ-пресета):
-    # zhkh_complete_user      — фрагмент ФИО для переключения учётки
-    # zhkh_initial_user       — фрагмент ФИО для возврата (пусто = не возвращать)
-    # zhkh_sidebar_section    — пункт sidebar после переключения
-    # zhkh_executor_fio       — ФИО исполнителя для резолюции
-    # zhkh_content_template   — шаблон «Содержание»
-    # zhkh_require_report     — включать тоггл «Требуется отчёт»
-    # zhkh_control_resolution — включать тоггл «Контрольная резолюция»
-    # zhkh_fallback_days      — если планируемая дата в прошлом,
-    #                            ставим today + N календарных дней
-    "zhkh_complete_user": "Басманов",
-    "zhkh_initial_user": "",
-    "zhkh_sidebar_section": "На резолюцию",
-    "zhkh_executor_fio": "Халецкая Юлия Владимировна",
-    "zhkh_content_template": "Для работы",
-    "zhkh_require_report": True,
-    "zhkh_control_resolution": True,
-    "zhkh_fallback_days": 3,
     # Пресеты сценариев — список словарей. Поля:
     #   name          — отображение в меню
     #   mode          — 'mix' / 'smart' / 'auto-create' / 'email'

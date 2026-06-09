@@ -47,7 +47,6 @@ jobs:
         --hidden-import=flows.auto_create
         --hidden-import=flows.smart
         --hidden-import=flows.email
-        --hidden-import=flows.zhkh_complete
         --hidden-import=flows.zhkh_daemon
         --hidden-import=shared.xlsx_lock
         --hidden-import=shared.xlsx_status
