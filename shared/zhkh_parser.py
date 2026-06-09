@@ -17,20 +17,26 @@ log = logging.getLogger("asud.zhkh")
 # Маркер что это вообще ГИС ЖКХ письмо: заголовок «Информация о заявителе»
 _ZHKH_MARKER = "Информация о заявителе"
 
-# Поля формата «Название_поля\t значение\t». Label может начинаться с начала
-# строки ИЛИ после таба (на одной строке бывает несколько полей подряд:
-# «Номер обращения\t XXX\t Дата получения обращения\t YYY\t»).
-_FIELD_RE_TEMPLATE = r'(?:(?<=\t)|^)\s*{label}\s*\t\s*([^\t\r\n]+?)\s*(?=\t|\r|\n|$)'
+# В письмах встречаются два формата раскладки полей:
+#   1) Блочный (новый, с июня 2026): label на своей строке, пустая строка, значение
+#      на следующей строке («Фамилия\n\nАрнгольд\n\n»).
+#   2) Табличный (старый): «Label\t Value\t Label2\t Value2\t» — несколько полей
+#      на одной строке, разделитель — таб.
+# Парсер пробует оба шаблона.
+_BLOCK_RE_TEMPLATE = r'(?ms)^\s*{label}\s*\r?\n\s*\r?\n\s*([^\r\n]+?)\s*\r?$'
+_TAB_RE_TEMPLATE   = r'(?:(?<=\t)|^)\s*{label}\s*\t\s*([^\t\r\n]+?)\s*(?=\t|\r|\n|$)'
 
 
 def _find_field(body, label):
-    """Ищет значение поля по названию в табличном body. None если не нашли."""
-    pat = _FIELD_RE_TEMPLATE.replace('{label}', re.escape(label))
-    m = re.search(pat, body, re.MULTILINE)
-    if m:
-        val = m.group(1).strip()
-        if val and val.lower() not in ('информация не указана', '-', '—'):
-            return val
+    """Ищет значение поля по названию. Пробует блочный и табличный форматы."""
+    for tmpl in (_BLOCK_RE_TEMPLATE, _TAB_RE_TEMPLATE):
+        pat = tmpl.replace('{label}', re.escape(label))
+        flags = re.MULTILINE if tmpl is _TAB_RE_TEMPLATE else 0
+        m = re.search(pat, body, flags)
+        if m:
+            val = m.group(1).strip()
+            if val and val.lower() not in ('информация не указана', '-', '—'):
+                return val
     return None
 
 
