@@ -33,6 +33,11 @@ jobs:
         --hidden-import=openpyxl
         --hidden-import=pyautogui
         --hidden-import=pywinauto
+        --hidden-import=xlsx_lock
+        --hidden-import=xlsx_status
+        --hidden-import=config
+        --hidden-import=ui
+        --hidden-import=correspondent
         resolutions.py
 
     - name: Upload EXE
