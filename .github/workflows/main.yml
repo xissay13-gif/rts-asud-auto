@@ -20,9 +20,14 @@ jobs:
     - name: Install dependencies
       run: pip install selenium openpyxl pyinstaller pyautogui pywinauto
 
-    - name: Build EXE
+    # Onedir вместо onefile: exe не распаковывает себя в %TEMP%, KAV
+    # реже срабатывает с PDM:Trojan.Win32.Generic. Структура:
+    #   dist/asud_resolutions/
+    #     asud_resolutions.exe
+    #     _internal/...
+    - name: Build EXE (onedir)
       run: >
-        pyinstaller --onefile --name asud_resolutions
+        pyinstaller --onedir --name asud_resolutions --noupx
         --add-data "addresses.csv;."
         --hidden-import=selenium.webdriver.edge.webdriver
         --hidden-import=selenium.webdriver.edge.service
@@ -40,8 +45,13 @@ jobs:
         --hidden-import=correspondent
         resolutions.py
 
-    - name: Upload EXE
+    - name: Zip dist folder
+      shell: pwsh
+      run: |
+        Compress-Archive -Path dist/asud_resolutions/* -DestinationPath dist/asud_resolutions.zip -Force
+
+    - name: Upload ZIP
       uses: actions/upload-artifact@v4
       with:
         name: asud_resolutions
-        path: dist/asud_resolutions.exe
+        path: dist/asud_resolutions.zip
