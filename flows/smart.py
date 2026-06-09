@@ -351,18 +351,50 @@ def create_one_document(driver, doc_data, index, total):
 
     # [5/6] Закрыть карточку (без регистрации — остаётся в черновиках)
     log.info(f"Документ {index}/{total} в черновиках")
+    closed = False
+    # Сначала ждём появления видимой кнопки header-close-btn (АСУД иногда
+    # создаёт несколько таких элементов — скрытые модалки + видимая карточка).
     try:
-        close_btn = driver.find_element(By.ID, "header-close-btn")
-        if close_btn.is_displayed():
-            ActionChains(driver).move_to_element(close_btn).pause(0.2).click().perform()
+        WebDriverWait(driver, 5).until(
+            lambda d: any(b.is_displayed()
+                          for b in d.find_elements(By.ID, "header-close-btn")))
     except Exception:
-        pass
+        log.debug("header-close-btn не появился за 5s")
+
+    candidates = driver.find_elements(By.ID, "header-close-btn")
+    for btn in candidates:
+        try:
+            if not btn.is_displayed():
+                continue
+        except Exception:
+            continue
+        # Multi-strategy click
+        try:
+            ActionChains(driver).move_to_element(btn).pause(0.2).click().perform()
+            closed = True
+            break
+        except Exception:
+            try:
+                driver.execute_script("arguments[0].click();", btn)
+                closed = True
+                break
+            except Exception:
+                continue
+
+    if not closed:
+        # Fallback — ESC. GXT-карточки часто реагируют.
+        try:
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+            log.debug("ESC отправлен для закрытия карточки")
+        except Exception:
+            pass
 
     # [6/6] Дождаться главной
     try:
         WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.ID, "mainscreen-create-button")))
     except Exception:
+        log.warning("Главная не появилась — перезагружаю страницу АСУД")
         driver.get(settings.get("asud_url", cfg.DEFAULTS["asud_url"]))
         wait_asud_loaded(driver)
 
