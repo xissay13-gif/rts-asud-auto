@@ -6,6 +6,6 @@ REM регистрация + На резолюцию для каждой стр�
 REM (используется пустышка как content).
 
 cd /d "%~dp0"
-"%~dp0asud.exe" --headless --mode=auto-create
+"%~dp0registration.exe" --headless --mode=auto-create
 
 pause

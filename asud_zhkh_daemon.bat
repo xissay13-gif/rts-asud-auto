@@ -7,6 +7,6 @@ REM Халецкой» выдаёт резолюцию и отмечает да�
 REM Ctrl+C — корректная остановка после текущего документа.
 
 cd /d "%~dp0"
-"%~dp0asud.exe" --mode=zhkh-daemon --headless
+"%~dp0registration.exe" --mode=zhkh-daemon --headless
 
 pause

@@ -23,12 +23,12 @@ jobs:
     # Onedir вместо onefile: exe не распаковывает себя в %TEMP% при запуске,
     # KAV почти не срабатывает с PDM:Trojan.Win32.Generic. --noupx — без
     # UPX-упаковки (тоже триггер для AV). Структура:
-    #   dist/asud/
-    #     asud.exe
+    #   dist/registration/
+    #     registration.exe
     #     _internal/  (DLL и Python-runtime)
     - name: Build EXE (onedir)
       run: >
-        pyinstaller --onedir --name asud --noupx
+        pyinstaller --onedir --name registration --noupx
         --add-data "addresses.csv;."
         --hidden-import=selenium.webdriver.edge.webdriver
         --hidden-import=selenium.webdriver.edge.service
@@ -58,25 +58,25 @@ jobs:
         --hidden-import=shared.xlsx_status
         app.py
 
-    # Копируем launchers и template настроек прямо в папку asud/
+    # Копируем launchers и template настроек прямо в папку registration/
     # — чтобы пользователь после распаковки ZIP мог сразу запускать .bat
-    # из той же папки где лежит asud.exe.
+    # из той же папки где лежит registration.exe.
     - name: Copy launchers + settings template
       shell: pwsh
       run: |
-        Copy-Item asud_headless.bat dist\asud\ -ErrorAction SilentlyContinue
-        Copy-Item asud_email_watch.bat dist\asud\ -ErrorAction SilentlyContinue
-        Copy-Item asud_auto_create_headless.bat dist\asud\ -ErrorAction SilentlyContinue
-        Copy-Item asud_zhkh_daemon.bat dist\asud\ -ErrorAction SilentlyContinue
-        Copy-Item settings.json.example dist\asud\ -ErrorAction SilentlyContinue
+        Copy-Item asud_headless.bat dist\registration\ -ErrorAction SilentlyContinue
+        Copy-Item asud_email_watch.bat dist\registration\ -ErrorAction SilentlyContinue
+        Copy-Item asud_auto_create_headless.bat dist\registration\ -ErrorAction SilentlyContinue
+        Copy-Item asud_zhkh_daemon.bat dist\registration\ -ErrorAction SilentlyContinue
+        Copy-Item settings.json.example dist\registration\ -ErrorAction SilentlyContinue
 
     - name: Zip dist folder
       shell: pwsh
       run: |
-        Compress-Archive -Path dist/asud/* -DestinationPath dist/asud.zip -Force
+        Compress-Archive -Path dist/registration/* -DestinationPath dist/registration.zip -Force
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: asud
-        path: dist/asud.zip
+        name: registration
+        path: dist/registration.zip
