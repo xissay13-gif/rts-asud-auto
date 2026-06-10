@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+import argparse
 import logging
 from datetime import date, datetime, timedelta
 
@@ -1539,6 +1540,22 @@ def process_one(driver, doc, index, total):
 # MAIN
 # ============================================================
 
+# Глобальный флаг unattended-режима — выставляется из main() при наличии
+# любого из batch-флагов (--headless / --preset / --xlsx / --yes). Когда
+# True — все паузы «Enter...» становятся no-op чтобы daemon не висел.
+_UNATTENDED = False
+
+
+def _block_if_interactive(prompt):
+    """input() только в интерактивном режиме. В headless/batch — no-op."""
+    if _UNATTENDED:
+        return ""
+    try:
+        return input(prompt)
+    except EOFError:
+        return ""
+
+
 def _pick_preset(presets):
     """Меню пресетов сценариев. Возвращает выбранный preset dict или None."""
     print("\nВыбери сценарий:")
@@ -1572,7 +1589,7 @@ def _choose_xlsx(base_dir):
     files = [f for f in os.listdir(base_dir) if f.lower().endswith('.xlsx')]
     if not files:
         log.error(f"Нет .xlsx в {base_dir}")
-        input("Enter...")
+        _block_if_interactive("Enter...")
         sys.exit(1)
     # Сортируем — файлы с '_резолюции' в имени идут первыми (наш формат)
     files.sort(key=lambda f: (0 if 'резолюции' in f.lower() else 1, f))
@@ -1583,6 +1600,10 @@ def _choose_xlsx(base_dir):
     for i, f in enumerate(files, 1):
         marker = ' ← рекомендую' if 'резолюции' in f.lower() and i == 1 else ''
         print(f"  {i}. {f}{marker}")
+    # В unattended-режиме автоматически берём первый (рекомендуемый) файл
+    if _UNATTENDED:
+        log.info(f"Unattended: автовыбор '{files[0]}'")
+        return os.path.join(base_dir, files[0])
     choice = input("Выбери номер [1]: ").strip() or "1"
     try:
         return os.path.join(base_dir, files[int(choice) - 1])
@@ -1595,12 +1616,17 @@ def _start_browser(base_dir):
     driver_path = os.path.join(base_dir, "msedgedriver.exe")
     if not os.path.exists(driver_path):
         log.error(f"msedgedriver.exe не найден в {base_dir}")
-        input("Enter...")
+        _block_if_interactive("Enter...")
         sys.exit(1)
 
     service = EdgeService(executable_path=driver_path)
     options = EdgeOptions()
-    options.add_argument("--start-maximized")
+    if os.environ.get('ASUD_HEADLESS') == '1':
+        options.add_argument("--headless=new")
+        options.add_argument("--window-size=1920,1080")
+        log.info("Edge запущен в HEADLESS режиме")
+    else:
+        options.add_argument("--start-maximized")
     options.add_argument("--auth-server-whitelist=*.interrao.ru")
     options.add_argument("--auth-negotiate-delegate-whitelist=*.interrao.ru")
     options.add_argument("--log-level=3")
@@ -1642,7 +1668,23 @@ def _quit_browser(driver):
 
 
 def main():
-    global settings
+    global settings, _UNATTENDED
+
+    parser = argparse.ArgumentParser(
+        description="АСУД ИК — выдача резолюций. Без флагов — интерактивный режим.")
+    parser.add_argument('--headless', action='store_true',
+                        help="Edge без GUI (фоновый режим)")
+    parser.add_argument('--preset', type=int, metavar='N',
+                        help="Номер пресета (1-N) из config.json, без меню")
+    parser.add_argument('--xlsx', metavar='PATH',
+                        help="Путь к xlsx-реестру (без меню выбора)")
+    parser.add_argument('--yes', action='store_true',
+                        help="Не спрашивать «Начать?» — сразу запускать")
+    args = parser.parse_args()
+
+    # Любой batch-флаг → unattended-режим: не зависаем на input("Enter...")
+    _UNATTENDED = bool(args.headless or args.preset or args.xlsx or args.yes)
+
     settings = cfg.load()
     cfg.keep_system_awake(True)
 
@@ -1653,14 +1695,24 @@ def main():
     base_dir = cfg.get_base_dir()
     _attach_file_logger(base_dir)
 
+    if args.headless:
+        os.environ['ASUD_HEADLESS'] = '1'
+
     # Меню пресетов (если есть в конфиге)
     presets = settings.get("presets") or []
     if presets:
-        preset = _pick_preset(presets)
-        if preset is None:
-            log.error("Пресет не выбран — выход")
-            sys.exit(1)
-        log.info(f"Пресет: {preset.get('name', '?')}")
+        if args.preset is not None:
+            if not (1 <= args.preset <= len(presets)):
+                log.error(f"--preset {args.preset} вне диапазона 1..{len(presets)}")
+                sys.exit(1)
+            preset = presets[args.preset - 1]
+            log.info(f"Пресет (из --preset): {preset.get('name', '?')}")
+        else:
+            preset = _pick_preset(presets)
+            if preset is None:
+                log.error("Пресет не выбран — выход")
+                sys.exit(1)
+            log.info(f"Пресет: {preset.get('name', '?')}")
         _apply_preset_to_settings(preset)
         log.info(f"  учётка:       {settings.get('target_account')}")
         log.info(f"  сайдбар:      {settings.get('sidebar_section')}")
@@ -1669,13 +1721,19 @@ def main():
         log.info(f"  контр. срок:  {settings.get('stage_date_mode')} "
                  f"+{settings.get('stage_date_days') or settings.get('workdays')}")
 
-    excel_path = _choose_xlsx(base_dir)
+    if args.xlsx:
+        if not os.path.isfile(args.xlsx):
+            log.error(f"--xlsx {args.xlsx}: файл не найден")
+            sys.exit(1)
+        excel_path = args.xlsx
+    else:
+        excel_path = _choose_xlsx(base_dir)
     log.info(f"Реестр: {excel_path}")
 
     docs = load_excel(excel_path)
     if not docs:
         log.error("Реестр пуст")
-        input("Enter...")
+        _block_if_interactive("Enter...")
         sys.exit(1)
 
     # Если пресет задаёт force_executor — подменяем у всех строк
@@ -1704,7 +1762,7 @@ def main():
             log.info(f"Пропускаю {skipped} уже отписанных строк (есть отметка в «{status_col}»)")
         if not docs:
             log.info("Все строки реестра уже отписаны — нечего делать")
-            input("Enter...")
+            _block_if_interactive("Enter...")
             return
 
     # Превью
@@ -1717,9 +1775,12 @@ def main():
     no_executor = sum(1 for d in docs if not d['executor'])
     print(f"\nВсего: {len(docs)} (без исполнителя: {no_executor} — будут пропущены)")
 
-    if input("Начать? (да/нет): ").strip().lower() not in ("да", "д", "y", "yes", ""):
-        print("Отменено.")
-        sys.exit(0)
+    if args.yes or _UNATTENDED:
+        log.info("Unattended: пропускаю подтверждение «Начать?»")
+    else:
+        if input("Начать? (да/нет): ").strip().lower() not in ("да", "д", "y", "yes", ""):
+            print("Отменено.")
+            sys.exit(0)
 
     driver = _start_browser(base_dir)
     try:
@@ -1730,7 +1791,7 @@ def main():
         if not switch_account(driver,
                 settings.get("target_account", cfg.DEFAULTS["target_account"])):
             log.error("Не удалось переключиться на учётку. Прерываю.")
-            input("Enter...")
+            _block_if_interactive("Enter...")
             return
 
         # Сайдбар → "На резолюцию" (внутри уже ждёт появления грида)
@@ -1823,10 +1884,10 @@ def main():
         for line in summary:
             log.info(line)
             print(line)
-        input("\nEnter для закрытия...")
+        _block_if_interactive("\nEnter для закрытия...")
     except Exception as e:
         log.error(f"Ошибка: {e}")
-        input("Enter...")
+        _block_if_interactive("Enter...")
     finally:
         _quit_browser(driver)
         cfg.keep_system_awake(False)

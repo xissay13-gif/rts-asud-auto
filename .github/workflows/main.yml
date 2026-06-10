@@ -42,8 +42,23 @@ jobs:
         --hidden-import=correspondent
         resolutions.py
 
-    - name: Upload EXE
+    # Складываем exe + батники в одну плоскую папку и пакуем в ZIP.
+    - name: Stage release files
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Path dist\release -Force | Out-Null
+        Copy-Item dist\asud_resolutions.exe dist\release\
+        Copy-Item asud_resolutions_headless.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item asud_resolutions_okrug.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item asud_resolutions_zhkh.bat dist\release\ -ErrorAction SilentlyContinue
+
+    - name: Zip release
+      shell: pwsh
+      run: |
+        Compress-Archive -Path dist/release/* -DestinationPath dist/asud_resolutions.zip -Force
+
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: asud_resolutions
-        path: dist/asud_resolutions.exe
+        path: dist/asud_resolutions.zip
