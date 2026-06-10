@@ -32,6 +32,10 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    WebDriverException, InvalidSessionIdException,
+    NoSuchWindowException, NoSuchElementException,
+)
 
 import config as cfg
 from ui import (click, wait_and_click, find_input_near_label,
@@ -49,20 +53,32 @@ log = logging.getLogger("asud.res")
 start_time = time.monotonic()
 
 
-def _attach_file_logger(base_dir):
-    """Подключает FileHandler с DEBUG: <base_dir>/Logs/resolutions_<timestamp>.log."""
+def _attach_file_logger(base_dir, rotate_daily=False):
+    """Подключает FileHandler с DEBUG: <base_dir>/Logs/resolutions_<timestamp>.log.
+
+    rotate_daily=True (для --watch): TimedRotatingFileHandler с ротацией
+    в полночь, бэкап 7 дней. Имя файла без timestamp: resolutions.log
+    (а старые получают суффикс .YYYY-MM-DD).
+    """
     try:
         logs_dir = os.path.join(base_dir, "Logs")
         os.makedirs(logs_dir, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(logs_dir, f"resolutions_{ts}.log")
-        fh = logging.FileHandler(path, encoding='utf-8')
+        if rotate_daily:
+            from logging.handlers import TimedRotatingFileHandler
+            path = os.path.join(logs_dir, "resolutions.log")
+            fh = TimedRotatingFileHandler(
+                path, when='midnight', backupCount=7, encoding='utf-8')
+        else:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(logs_dir, f"resolutions_{ts}.log")
+            fh = logging.FileHandler(path, encoding='utf-8')
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(logging.Formatter(
             '%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s',
             datefmt='%H:%M:%S'))
         logging.getLogger().addHandler(fh)
-        log.info(f"Подробный лог пишется в: {path}")
+        log.info(f"Подробный лог пишется в: {path}"
+                 + (" (ротация ежесуточно, бэкап 7д)" if rotate_daily else ""))
         return path
     except Exception as e:
         log.warning(f"Не удалось создать файл лога: {e}")
@@ -1658,6 +1674,115 @@ def _relogin(driver, url, switch_to, sidebar):
     return True
 
 
+# ============================================================
+# Daemon: driver crash detection + recovery
+# ============================================================
+#
+# Если Edge упадёт (память / KAV убьёт процесс / MSI обновится в фоне) —
+# driver останется со старым session_id, каждый WebDriver-вызов будет
+# фейлить с InvalidSessionIdException. Без recovery daemon крутится
+# в холостую и никто не замечает.
+#
+# Триггеры на пересоздание:
+#   - InvalidSessionIdException        — сессия мертва
+#   - NoSuchWindowException            — окно закрыто
+#   - WebDriverException c "chrome not reachable"/"target window already closed"/
+#     "session deleted because of page crash" в сообщении
+
+_DRIVER_CRASH_MARKERS = (
+    "not reachable",
+    "session deleted",
+    "target window already closed",
+    "no such window",
+    "disconnected",
+    "browser has closed",
+    "chrome failed to start",
+    "session not created",
+)
+
+
+def _is_driver_crash(exc):
+    """True если исключение похоже на смерть драйвера/браузера."""
+    if isinstance(exc, (InvalidSessionIdException, NoSuchWindowException)):
+        return True
+    if isinstance(exc, WebDriverException):
+        msg = (str(exc) or '').lower()
+        return any(m in msg for m in _DRIVER_CRASH_MARKERS)
+    return False
+
+
+def _driver_alive(driver):
+    """Лёгкая проверка — current_url. Если драйвер мёртв — кидает
+    WebDriverException, ловим и отдаём False."""
+    try:
+        _ = driver.current_url
+        return True
+    except Exception:
+        return False
+
+
+def _recreate_driver(old_driver, base_dir, url, switch_to, sidebar):
+    """Убивает старый driver (best-effort), запускает новый, делает login.
+
+    Возвращает новый driver или None если не смогли.
+    """
+    log.warning("Driver crash recovery: убиваю старый driver, поднимаю новый")
+    try:
+        old_driver.quit()
+    except Exception:
+        pass
+
+    # Edge zombie cleanup: после краша msedge.exe/msedgedriver.exe
+    # могут остаться висеть. Лучше прибить — иначе следующая сессия
+    # подцепится к мёртвому профилю.
+    if sys.platform.startswith('win'):
+        for name in ("msedgedriver.exe", "msedge.exe"):
+            try:
+                import subprocess
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", name],
+                    capture_output=True, timeout=5,
+                )
+            except Exception:
+                pass
+        time.sleep(1)  # дать ОС закрыть handles
+
+    try:
+        new_driver = _start_browser(base_dir)
+    except Exception as e:
+        log.error(f"Recovery: _start_browser упал: {e}")
+        return None
+
+    try:
+        _go_to_asud(new_driver, url)
+    except Exception as e:
+        log.error(f"Recovery: _go_to_asud упал: {e}")
+        try:
+            new_driver.quit()
+        except Exception:
+            pass
+        return None
+
+    if not switch_account(new_driver, switch_to):
+        log.error("Recovery: switch_account не сработал")
+        try:
+            new_driver.quit()
+        except Exception:
+            pass
+        return None
+
+    if not click_sidebar_section(new_driver, sidebar):
+        log.error("Recovery: sidebar не открылся")
+        try:
+            new_driver.quit()
+        except Exception:
+            pass
+        return None
+
+    log.info("Driver crash recovery: новый driver запущен и залогинен")
+    return new_driver
+
+
 def _pick_preset(presets):
     """Меню пресетов сценариев. Возвращает выбранный preset dict или None."""
     print("\nВыбери сценарий:")
@@ -1801,7 +1926,9 @@ def main():
     log.info("=" * 50)
 
     base_dir = cfg.get_base_dir()
-    _attach_file_logger(base_dir)
+    # В --watch — ротация лога ежесуточно (иначе один файл на дни/недели
+    # вырастает до гигабайтов). В one-shot — обычный per-run файл.
+    _attach_file_logger(base_dir, rotate_daily=args.watch)
 
     if args.headless:
         os.environ['ASUD_HEADLESS'] = '1'
@@ -1968,14 +2095,28 @@ def main():
             except Exception as e:
                 log.warning(f"Reset to list упал: {e}")
 
+        def _ensure_driver():
+            """Проверяет что driver жив. Если нет — пересоздаёт +relogin.
+            Возвращает True если driver готов, False если recovery провалился."""
+            nonlocal driver, last_heartbeat
+            if _driver_alive(driver):
+                return True
+            new = _recreate_driver(driver, base_dir, url, target_account, sidebar)
+            if new is None:
+                return False
+            driver = new
+            last_heartbeat = time.monotonic()
+            return True
+
         def _process_batch(batch_docs):
-            """Прогоняет список docs через process_one, возвращает (done, skip, err)
-            добавки к глобальным счётчикам. Обновляет done/skip/err через nonlocal."""
-            nonlocal done, skip, err
+            """Прогоняет список docs через process_one. Возвращает True если
+            прошёл нормально, False если driver упал в середине (тогда caller
+            должен сам ensure_driver и попробовать снова на след. итерации)."""
+            nonlocal done, skip, err, driver
             for i, doc in enumerate(batch_docs, 1):
                 if _stop_flag:
                     log.info("Stop-flag установлен — прерываю batch")
-                    return
+                    return True
                 try:
                     ok = process_one(driver, doc, i, len(batch_docs))
                     if ok:
@@ -1987,12 +2128,30 @@ def main():
                         skip += 1
                         _reset_to_list()
                 except Exception as e:
+                    if _is_driver_crash(e):
+                        log.error(f"ДРАЙВЕР УПАЛ на документе {i}: {e}")
+                        # В daemon — caller на след. итерации сделает recovery
+                        # и пересоберёт todo. В one-shot — выходим из batch,
+                        # finally вверху закроет всё.
+                        return False
                     log.error(f"ОШИБКА документ {i}: {e}")
                     err += 1
-                    _reset_to_list(force_full=True)
+                    try:
+                        _reset_to_list(force_full=True)
+                    except Exception as e2:
+                        if _is_driver_crash(e2):
+                            log.error(f"Drivers упал во время reset: {e2}")
+                            return False
+                        log.warning(f"Reset тоже не сработал: {e2}")
+            return True
 
         # Первый проход — по уже загруженному списку docs
-        _process_batch(docs)
+        batch_ok = _process_batch(docs)
+        if not batch_ok and args.watch:
+            # Daemon: попробуем восстановить driver — следующая итерация
+            # перечитает реестр и докрутит непрошедшие документы.
+            if not _ensure_driver():
+                log.error("Recovery после первого batch не удался")
 
         # === DAEMON-режим: продолжаем опрашивать xlsx до Ctrl+C ===========
         if args.watch and not _stop_flag:
@@ -2013,9 +2172,25 @@ def main():
                     break
                 iters += 1
 
+                # Driver crash check — ставим в начало итерации перед
+                # любыми операциями с driver. Если упал — пересоздаём.
+                if not _ensure_driver():
+                    log.error(f"[итер. {iters}] driver crash recovery не удался, "
+                              f"повтор через 60с")
+                    _interruptible_sleep(60)
+                    continue
+
                 # Heartbeat — проверяем что в шапке всё ещё нужная учётка
                 if time.monotonic() - last_heartbeat > HEARTBEAT_INTERVAL_SEC:
-                    if not _session_alive(driver, target_account):
+                    try:
+                        alive = _session_alive(driver, target_account)
+                    except Exception as e:
+                        if _is_driver_crash(e):
+                            log.error(f"Heartbeat: driver упал ({e}) — recovery")
+                            _ensure_driver()
+                            continue
+                        alive = False
+                    if not alive:
                         if not _relogin(driver, url, target_account, sidebar):
                             log.error("Heartbeat: re-login не удался, повтор через 60с")
                             _interruptible_sleep(60)
@@ -2048,7 +2223,14 @@ def main():
                     continue
 
                 log.info(f"[итер. {iters}] todo: {len(new_docs)} новых документов")
-                _process_batch(new_docs)
+                batch_ok = _process_batch(new_docs)
+                if not batch_ok:
+                    log.warning(f"[итер. {iters}] batch прерван driver-crash'ем "
+                                f"— непрошедшие документы попробуем на след. итерации")
+                    # mtime НЕ сбрасываем — на след. итерации увидим что
+                    # mtime не изменился, но всё равно зайдём через ensure_driver
+                    # и переобработаем (force через сброс кэша)
+                    last_mtime = 0
         # === END daemon =====================================================
 
         elapsed_seconds = time.monotonic() - start_time
