@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+import signal
 import argparse
 import logging
 from datetime import date, datetime, timedelta
@@ -1541,8 +1542,8 @@ def process_one(driver, doc, index, total):
 # ============================================================
 
 # Глобальный флаг unattended-режима — выставляется из main() при наличии
-# любого из batch-флагов (--headless / --preset / --xlsx / --yes). Когда
-# True — все паузы «Enter...» становятся no-op чтобы daemon не висел.
+# любого из batch-флагов (--headless / --preset / --xlsx / --yes / --watch).
+# Когда True — все паузы «Enter...» становятся no-op чтобы daemon не висел.
 _UNATTENDED = False
 
 
@@ -1554,6 +1555,68 @@ def _block_if_interactive(prompt):
         return input(prompt)
     except EOFError:
         return ""
+
+
+# ============================================================
+# Daemon: Ctrl+C handling
+# ============================================================
+
+_stop_flag = False
+
+
+def _on_sigint(signum, frame):
+    global _stop_flag
+    if _stop_flag:
+        log.error("Повторный Ctrl+C — выхожу немедленно")
+        sys.exit(1)
+    _stop_flag = True
+    log.info("Получен Ctrl+C — остановлюсь после текущего документа")
+
+
+def _interruptible_sleep(seconds):
+    """Sleep с проверкой _stop_flag раз в 0.5с — для быстрого выхода по Ctrl+C."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if _stop_flag:
+            return
+        time.sleep(0.5)
+
+
+# ============================================================
+# Daemon: session heartbeat + re-login
+# ============================================================
+
+HEARTBEAT_INTERVAL_SEC = 300  # каждые 5 минут проверяем не разлогинило ли
+
+
+def _session_alive(driver, expected_user):
+    """Проверяет что в шапке всё ещё видна нужная учётка. Если шапки нет,
+    скорее всего нас разлогинило (АСУД редиректит на login-страницу)."""
+    try:
+        return _account_active(driver, expected_user, timeout=3)
+    except Exception:
+        return False
+
+
+def _relogin(driver, url, switch_to, sidebar):
+    """Полный re-login: открыть АСУД заново → переключить учётку → сайдбар.
+    Используется когда _session_alive отдал False (idle/timeout разлогинил).
+    """
+    log.warning(f"Heartbeat: сессия с '{switch_to}' потерялась — переподключаюсь")
+    try:
+        driver.get(url)
+        _wait_profile_loaded(driver)
+    except Exception as e:
+        log.error(f"Re-login: driver.get упал: {e}")
+        return False
+    if not switch_account(driver, switch_to):
+        log.error(f"Re-login: switch_account на '{switch_to}' не сработал")
+        return False
+    if not click_sidebar_section(driver, sidebar):
+        log.error(f"Re-login: sidebar '{sidebar}' не открылся")
+        return False
+    log.info("Heartbeat: сессия восстановлена")
+    return True
 
 
 def _pick_preset(presets):
@@ -1680,10 +1743,16 @@ def main():
                         help="Путь к xlsx-реестру (без меню выбора)")
     parser.add_argument('--yes', action='store_true',
                         help="Не спрашивать «Начать?» — сразу запускать")
+    parser.add_argument('--watch', action='store_true',
+                        help="Непрерывный мониторинг xlsx (daemon-режим). "
+                             "После одного прохода не выходит, а ждёт новых "
+                             "строк. Ctrl+C — корректная остановка.")
+    parser.add_argument('--poll-interval', type=int, default=30, metavar='SEC',
+                        help="Интервал поллинга xlsx в --watch режиме (по умолчанию 30с)")
     args = parser.parse_args()
 
     # Любой batch-флаг → unattended-режим: не зависаем на input("Enter...")
-    _UNATTENDED = bool(args.headless or args.preset or args.xlsx or args.yes)
+    _UNATTENDED = bool(args.headless or args.preset or args.xlsx or args.yes or args.watch)
 
     settings = cfg.load()
     cfg.keep_system_awake(True)
@@ -1782,23 +1851,34 @@ def main():
             print("Отменено.")
             sys.exit(0)
 
+    # SIGINT-handler — на случай --watch чтобы Ctrl+C мягко останавливал.
+    # В one-shot режиме тоже не повредит (стандартный KeyboardInterrupt дальше
+    # пройдёт через try/finally так же чисто).
+    signal.signal(signal.SIGINT, _on_sigint)
+    try:
+        signal.signal(signal.SIGTERM, _on_sigint)
+    except (AttributeError, ValueError):
+        pass
+
     driver = _start_browser(base_dir)
     try:
         url = settings.get("asud_url", cfg.DEFAULTS["asud_url"])
         _go_to_asud(driver, url)
 
+        target_account = settings.get("target_account", cfg.DEFAULTS["target_account"])
+        sidebar = settings.get("sidebar_section", cfg.DEFAULTS["sidebar_section"])
+
         # Переключение учётки
-        if not switch_account(driver,
-                settings.get("target_account", cfg.DEFAULTS["target_account"])):
+        if not switch_account(driver, target_account):
             log.error("Не удалось переключиться на учётку. Прерываю.")
             _block_if_interactive("Enter...")
             return
 
         # Сайдбар → "На резолюцию" (внутри уже ждёт появления грида)
-        click_sidebar_section(driver,
-            settings.get("sidebar_section", cfg.DEFAULTS["sidebar_section"]))
+        click_sidebar_section(driver, sidebar)
 
         done, err, skip = 0, 0, 0
+        last_heartbeat = time.monotonic()
 
         def _list_accessible():
             """Проверка: видим ли фильтр-input на колонке Номер. Если да —
@@ -1849,23 +1929,88 @@ def main():
             except Exception as e:
                 log.warning(f"Reset to list упал: {e}")
 
-        for i, doc in enumerate(docs, 1):
-            try:
-                ok = process_one(driver, doc, i, len(docs))
-                if ok:
-                    done += 1
-                    # Защита: после успеха карточка могла остаться открытой —
-                    # проверим что список доступен, иначе закроем.
-                    if not _list_accessible():
-                        log.info("[main] список не доступен после success — lightweight reset")
+        def _process_batch(batch_docs):
+            """Прогоняет список docs через process_one, возвращает (done, skip, err)
+            добавки к глобальным счётчикам. Обновляет done/skip/err через nonlocal."""
+            nonlocal done, skip, err
+            for i, doc in enumerate(batch_docs, 1):
+                if _stop_flag:
+                    log.info("Stop-flag установлен — прерываю batch")
+                    return
+                try:
+                    ok = process_one(driver, doc, i, len(batch_docs))
+                    if ok:
+                        done += 1
+                        if not _list_accessible():
+                            log.info("[main] список не доступен после success — lightweight reset")
+                            _reset_to_list()
+                    else:
+                        skip += 1
                         _reset_to_list()
-                else:
-                    skip += 1
-                    _reset_to_list()
-            except Exception as e:
-                log.error(f"ОШИБКА документ {i}: {e}")
-                err += 1
-                _reset_to_list(force_full=True)
+                except Exception as e:
+                    log.error(f"ОШИБКА документ {i}: {e}")
+                    err += 1
+                    _reset_to_list(force_full=True)
+
+        # Первый проход — по уже загруженному списку docs
+        _process_batch(docs)
+
+        # === DAEMON-режим: продолжаем опрашивать xlsx до Ctrl+C ===========
+        if args.watch and not _stop_flag:
+            log.info("=" * 60)
+            log.info(f"WATCH-режим: опрашиваю {excel_path} каждые "
+                     f"{args.poll_interval}с. Ctrl+C для остановки.")
+            log.info("=" * 60)
+
+            try:
+                last_mtime = os.path.getmtime(excel_path)
+            except OSError:
+                last_mtime = 0
+            iters = 0
+
+            while not _stop_flag:
+                _interruptible_sleep(args.poll_interval)
+                if _stop_flag:
+                    break
+                iters += 1
+
+                # Heartbeat — проверяем что в шапке всё ещё нужная учётка
+                if time.monotonic() - last_heartbeat > HEARTBEAT_INTERVAL_SEC:
+                    if not _session_alive(driver, target_account):
+                        if not _relogin(driver, url, target_account, sidebar):
+                            log.error("Heartbeat: re-login не удался, повтор через 60с")
+                            _interruptible_sleep(60)
+                            continue
+                    last_heartbeat = time.monotonic()
+
+                # mtime-кэш: если файл не менялся — реестр не перечитываем
+                try:
+                    cur_mtime = os.path.getmtime(excel_path)
+                except OSError:
+                    log.debug(f"[итер. {iters}] xlsx недоступен — sleep")
+                    continue
+                if cur_mtime == last_mtime:
+                    log.debug(f"[итер. {iters}] xlsx не менялся — skip read")
+                    continue
+                last_mtime = cur_mtime
+
+                # Перечитываем реестр и фильтруем
+                new_docs = load_excel(excel_path) or []
+                if force_exe:
+                    for d in new_docs:
+                        d['executor'] = force_exe
+                already_now = get_done_asud_ids(excel_path, status_col)
+                new_docs = [d for d in new_docs
+                            if d.get('asud_id') and d.get('asud_id') not in already_now
+                            and d.get('executor')]
+
+                if not new_docs:
+                    log.debug(f"[итер. {iters}] todo пусто после фильтра")
+                    continue
+
+                log.info(f"[итер. {iters}] todo: {len(new_docs)} новых документов")
+                _process_batch(new_docs)
+        # === END daemon =====================================================
 
         elapsed_seconds = time.monotonic() - start_time
         elapsed = timedelta(seconds=int(elapsed_seconds))

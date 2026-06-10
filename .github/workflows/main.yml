@@ -40,6 +40,7 @@ jobs:
         --hidden-import=config
         --hidden-import=ui
         --hidden-import=correspondent
+        --collect-submodules=openpyxl
         resolutions.py
 
     # Складываем exe + батники в одну плоскую папку и пакуем в ZIP.
@@ -51,6 +52,8 @@ jobs:
         Copy-Item asud_resolutions_headless.bat dist\release\ -ErrorAction SilentlyContinue
         Copy-Item asud_resolutions_okrug.bat dist\release\ -ErrorAction SilentlyContinue
         Copy-Item asud_resolutions_zhkh.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item asud_resolutions_okrug_watch.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item asud_resolutions_zhkh_watch.bat dist\release\ -ErrorAction SilentlyContinue
 
     - name: Zip release
       shell: pwsh
