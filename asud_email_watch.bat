@@ -5,6 +5,6 @@ REM Двойной клик → меню пресетов (ОЭК/ТЭС) → da
 REM Ctrl+C для остановки.
 
 cd /d "%~dp0"
-"%~dp0registration.exe" --headless --watch
+"%~dp0asud.exe" --headless --watch
 
 pause

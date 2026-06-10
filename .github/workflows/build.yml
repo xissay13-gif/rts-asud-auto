@@ -20,12 +20,12 @@ jobs:
     - name: Install dependencies
       run: pip install selenium openpyxl pyinstaller extract-msg colorama
 
-    # Onefile: один registration.exe + батники. KAV ругается одинаково
+    # Onefile: один asud.exe + батники. KAV ругается одинаково
     # на onedir и onefile (поведенческий детектор), так что смысла дробить
     # на папку нет — храним удобный single-exe.
     - name: Build EXE (onefile)
       run: >
-        pyinstaller --onefile --name registration
+        pyinstaller --onefile --name asud
         --add-data "addresses.csv;."
         --hidden-import=selenium.webdriver.edge.webdriver
         --hidden-import=selenium.webdriver.edge.service
@@ -61,7 +61,7 @@ jobs:
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Path dist\release -Force | Out-Null
-        Copy-Item dist\registration.exe dist\release\
+        Copy-Item dist\asud.exe dist\release\
         Copy-Item asud_headless.bat dist\release\ -ErrorAction SilentlyContinue
         Copy-Item asud_email_watch.bat dist\release\ -ErrorAction SilentlyContinue
         Copy-Item asud_auto_create_headless.bat dist\release\ -ErrorAction SilentlyContinue
@@ -71,10 +71,10 @@ jobs:
     - name: Zip release
       shell: pwsh
       run: |
-        Compress-Archive -Path dist/release/* -DestinationPath dist/registration.zip -Force
+        Compress-Archive -Path dist/release/* -DestinationPath dist/asud.zip -Force
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: registration
-        path: dist/registration.zip
+        name: asud
+        path: dist/asud.zip
