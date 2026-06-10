@@ -3,8 +3,8 @@
 
   "asud_url": "https://asud.interrao.ru/asudik/",
 
-  "_comment_poll": "Интервал опроса xlsx-реестров в --watch (daemon-режим), в секундах. По умолчанию 300 (5 мин). Переопределяется флагом --poll-interval.",
-  "poll_interval_sec": 300,
+  "_comment_poll": "Интервал опроса xlsx-реестров в --watch (daemon-режим), в секундах. По умолчанию 480 (8 мин). Намеренно отличается от регистратора (5 мин в email-zhkh::settings.json) — чтобы два daemon'а на одной шаре редко пересекались в момент чтения одного xlsx. Переопределяется флагом --poll-interval.",
+  "poll_interval_sec": 480,
 
   "_comment_round_robin": "true → каждые poll_interval_sec проверяется ОДИН реестр из preset.watch по очереди (ОЭК → ТЭС → ГИСЖКХ → ОЭК → ...). false (дефолт) → каждый тик проверяются все, но только изменённые перечитываются.",
   "watch_round_robin": false,
