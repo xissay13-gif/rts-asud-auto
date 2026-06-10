@@ -1,7 +1,7 @@
 {
   "_comment": "Шаблон settings.json. Скопируй и переименуй в settings.json рядом с asud.exe — exe подхватит без пересборки. Любой ключ можно убрать — будет взято значение по умолчанию из DEFAULTS в коде. config.json (старое имя) тоже работает — для обратной совместимости.",
 
-  "_comment_presets": "Каждый пресет — отдельный сценарий в меню при запуске asud.exe без флагов. Поля: name (как показать), mode (mix/smart/auto-create/email), folder (источник .msg для email-flow), xlsx (путь к реестру для mix/auto-create/smart), outlook_dir (папка где искать .msg по Link для mix-вложений; может совпадать с folder или нет), output_suffix (добавляется в имя per-date xlsx чтобы не конфликтовали реестры разных пресетов), delete_after_done (по умолчанию true — обработанные .msg удаляются; поставь false если хочешь бэкап в Завершено/).",
+  "_comment_presets": "Каждый пресет — отдельный сценарий в меню при запуске asud.exe без флагов. Поля: name (как показать), mode (mix/smart/auto-create/email), folder (источник .msg для email-flow — ОДНА папка) ИЛИ folders (список папок для round-robin мониторинга), xlsx (путь к реестру для mix/auto-create/smart), outlook_dir (папка где искать .msg по Link для mix-вложений; может совпадать с folder или нет), output_suffix (добавляется в имя per-date xlsx чтобы не конфликтовали реестры разных пресетов), round_robin (true — в watch-режиме обходит folders по очереди; false — все папки на каждом тике), delete_after_done (по умолчанию true — обработанные .msg удаляются; поставь false если хочешь бэкап в Завершено/).",
   "presets": [
     {
       "name": "ОЭК — Smart (черновики)",
@@ -28,6 +28,17 @@
       "xlsx": "D:\\OutlookSubjects\\ГИСЖКХ\\ГИСЖКХ.xlsx",
       "outlook_dir": "D:\\OutlookSubjects\\ГИСЖКХ",
       "output_suffix": "ГИСЖКХ"
+    },
+    {
+      "name": "Все потоки (round-robin) — Mix",
+      "mode": "mix",
+      "folders": [
+        {"dir": "D:\\OutlookSubjects\\ОЭК",    "output_suffix": "ОЭК"},
+        {"dir": "D:\\OutlookSubjects\\ТЭС",    "output_suffix": "ТЭС"},
+        {"dir": "D:\\OutlookSubjects\\ГИСЖКХ", "output_suffix": "ГИСЖКХ"}
+      ],
+      "round_robin": true,
+      "delete_after_done": true
     }
   ],
 

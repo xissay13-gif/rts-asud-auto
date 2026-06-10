@@ -165,6 +165,21 @@ def main():
         # Заполняем args из пресета и продолжаем обычный flow
         if preset.get("folder"):
             args.folder = preset["folder"]
+        elif preset.get("folders"):
+            # Multi-folder preset: пробрасываем через env как JSON.
+            # daemon_main распарсит и будет ходить по списку (опционально
+            # с round-robin).
+            import json as _json
+            os.environ['ASUD_EMAIL_FOLDERS_JSON'] = _json.dumps(
+                preset["folders"], ensure_ascii=False)
+            # Принудительно включаем watch+email-режим — multi-folder работает
+            # только в daemon-loop'е.
+            args.watch = True
+            args.folder = preset["folders"][0].get("dir") if isinstance(
+                preset["folders"][0], dict) else preset["folders"][0]
+            # ASUD_EMAIL_ROUND_ROBIN — daemon_main прочитает
+            if preset.get("round_robin"):
+                os.environ['ASUD_EMAIL_ROUND_ROBIN'] = '1'
         if preset.get("mode"):
             args.mode = preset["mode"]
         # xlsx из пресета — авто-подстановка реестра для mix/auto-create/smart

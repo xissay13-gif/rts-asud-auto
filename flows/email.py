@@ -743,27 +743,71 @@ def daemon_main():
                                     cfg.DEFAULTS["email_max_retries"]))
     process_mode = os.environ.get('ASUD_EMAIL_PROCESS_MODE', 'mix')
     output_suffix = os.environ.get('ASUD_OUTPUT_SUFFIX') or None
+
+    # Multi-folder режим — пресет с "folders" списком вместо "folder" строки.
+    # Если ASUD_EMAIL_FOLDERS_JSON задан, обрабатываем все эти папки
+    # (по очереди если round_robin=true, либо все за тик если false).
+    import json as _json
+    folders_list = []
+    round_robin_mode = False
+    raw_json = os.environ.get('ASUD_EMAIL_FOLDERS_JSON')
+    if raw_json:
+        try:
+            raw_list = _json.loads(raw_json)
+            # Нормализуем элементы: string → {dir, output_suffix=basename},
+            # dict → как есть
+            for e in raw_list:
+                if isinstance(e, dict):
+                    if e.get("dir"):
+                        folders_list.append({
+                            "dir": e["dir"],
+                            "output_suffix": e.get("output_suffix") or os.path.basename(e["dir"]),
+                        })
+                elif isinstance(e, str):
+                    folders_list.append({
+                        "dir": e,
+                        "output_suffix": os.path.basename(e),
+                    })
+            round_robin_mode = os.environ.get('ASUD_EMAIL_ROUND_ROBIN') == '1'
+        except Exception as e:
+            log.error(f"ASUD_EMAIL_FOLDERS_JSON не распарсился: {e}")
+            folders_list = []
+
     log.info(f"Логика обработки: {process_mode}"
-             + (f", суффикс реестра: {output_suffix}" if output_suffix else ""))
+             + (f", суффикс реестра: {output_suffix}" if output_suffix and not folders_list else ""))
 
-    # Папка — спрашиваем всегда, даже при пресете
-    default = os.environ.get('ASUD_EMAIL_FOLDER') \
-              or settings.get("email_folder", "")
-    print(f"\nПапка с .msg-письмами для непрерывного мониторинга.")
-    if default:
-        print(f"Enter — использовать: {default}")
-    user_dir = input("Путь: ").strip().strip('"').strip("'")
-    folder = user_dir or default
-    if folder:
-        ok, folder = _wait_for_folder(folder)
+    if folders_list:
+        # Multi-folder: показываем список, валидируем (но не падаем если что-то
+        # не нашлось — daemon будет переопрашивать)
+        log.info(f"Multi-folder режим: {len(folders_list)} папок"
+                 + (" (round-robin)" if round_robin_mode else " (все за тик)"))
+        for e in folders_list:
+            ok, new_dir = _wait_for_folder(e["dir"])
+            e["dir"] = new_dir  # сохраним возможный UNC-fix
+            marker = "✓" if ok else "⚠"
+            log.info(f"  {marker} {e['dir']} (suffix={e['output_suffix']})")
+        # folder для legacy-вызовов (move_to_errors и т.п. перед стартом loop'а)
+        # просто берём первую папку. Дальше в loop'е current_folder per-tick.
+        folder = folders_list[0]["dir"]
     else:
-        ok = False
-    if not ok:
-        log.error(f"Папка не найдена (после ретраев): {folder!r}")
-        input("Enter...")
-        sys.exit(1)
+        # Single-folder (legacy): спрашиваем папку у юзера
+        default = os.environ.get('ASUD_EMAIL_FOLDER') \
+                  or settings.get("email_folder", "")
+        print(f"\nПапка с .msg-письмами для непрерывного мониторинга.")
+        if default:
+            print(f"Enter — использовать: {default}")
+        user_dir = input("Путь: ").strip().strip('"').strip("'")
+        folder = user_dir or default
+        if folder:
+            ok, folder = _wait_for_folder(folder)
+        else:
+            ok = False
+        if not ok:
+            log.error(f"Папка не найдена (после ретраев): {folder!r}")
+            input("Enter...")
+            sys.exit(1)
+        log.info(f"Папка: {folder}")
 
-    log.info(f"Папка: {folder}")
     log.info(f"Опрос: каждые {interval} сек, макс retry: {max_retries}")
     print(f"\nМониторинг включён. Ctrl+C для остановки.")
 
@@ -791,76 +835,101 @@ def daemon_main():
     # Счётчики и retry-state
     retry_count = {}  # basename → int (фейлов подряд)
     totals = {"OK": 0, "DUPLICATE": 0, "DRAFT": 0, "FAILED": 0, "ITER": 0}
+    rr_idx = 0  # для round-robin между папками
 
-    try:
-        while not _stop_flag:
-            totals["ITER"] += 1
-            queue = _list_root_msgs(folder)
-            if not queue:
-                log.info(f"[итер. {totals['ITER']}] очередь пуста — sleep {interval}s")
-                _interruptible_sleep(interval)
+    def _process_folder(current_folder, current_suffix):
+        """Обрабатывает все .msg из current_folder. Логика как раньше,
+        просто вынесена в функцию чтобы вызываться для каждой папки в
+        multi-folder режиме. Использует closure: driver, base_dir и т.д."""
+        queue = _list_root_msgs(current_folder)
+        if not queue:
+            return 0  # ничего не было
+        log.info(f"[итер. {totals['ITER']}] {os.path.basename(current_folder)}: "
+                 f"в очереди {len(queue)}")
+        for idx, msg_path in enumerate(queue, 1):
+            if _stop_flag:
+                return idx
+            name = os.path.basename(msg_path)
+
+            doc = _parse_one_msg(msg_path, process_mode)
+            if doc is None:
+                move_to_errors(msg_path, current_folder,
+                               "Не удалось распарсить или пустое")
+                totals["FAILED"] += 1
+                retry_count.pop(name, None)
+                _print_doc_line(idx, len(queue), "FAILED",
+                                 "не распарсилось / пустое")
                 continue
 
-            log.info(f"[итер. {totals['ITER']}] в очереди: {len(queue)}")
-            for idx, msg_path in enumerate(queue, 1):
-                if _stop_flag:
-                    break
-                name = os.path.basename(msg_path)
-
-                doc = _parse_one_msg(msg_path, process_mode)
-                if doc is None:
-                    # битый/пустой .msg — сразу в Ошибки чтобы не зацикливаться
-                    move_to_errors(msg_path, folder,
-                                   "Не удалось распарсить или пустое")
-                    totals["FAILED"] += 1
-                    retry_count.pop(name, None)
-                    _print_doc_line(idx, len(queue), "FAILED",
-                                     "не распарсилось / пустое")
-                    continue
-
-                try:
-                    status, _asud_id, _xlsx = _process_doc(
-                                           driver, doc, base_dir, folder,
-                                           idx, len(queue), in_daemon=True,
-                                           process_mode=process_mode,
-                                           output_suffix=output_suffix)
-                    if status == "FAILED":
-                        retry_count[name] = retry_count.get(name, 0) + 1
-                        if retry_count[name] >= max_retries:
-                            move_to_errors(msg_path, folder,
-                                f"Регистрация не удалась за {max_retries} попыток")
-                            retry_count.pop(name, None)
-                            totals["FAILED"] += 1
-                            _print_doc_line(idx, len(queue), "FAILED",
-                                             f"max_retries ({max_retries}) → Ошибки/")
-                        else:
-                            log.warning(f"{name}: фейл {retry_count[name]}/{max_retries} "
-                                        f"— оставляю в корне на следующую итерацию")
-                            _print_doc_line(idx, len(queue), "FAILED",
-                                             f"retry {retry_count[name]}/{max_retries}")
-                        try:
-                            driver.get(url)
-                            wait_asud_loaded(driver)
-                        except Exception:
-                            pass
-                    else:
-                        totals[status] = totals.get(status, 0) + 1
-                        retry_count.pop(name, None)
-                        _print_doc_line(idx, len(queue), status,
-                                         doc.get("тема", "")[:60])
-                except Exception as e:
-                    log.error(f"Exception на {name}: {e}")
+            try:
+                status, _asud_id, _xlsx = _process_doc(
+                                       driver, doc, base_dir, current_folder,
+                                       idx, len(queue), in_daemon=True,
+                                       process_mode=process_mode,
+                                       output_suffix=current_suffix)
+                if status == "FAILED":
                     retry_count[name] = retry_count.get(name, 0) + 1
                     if retry_count[name] >= max_retries:
-                        move_to_errors(msg_path, folder, f"Exception: {e}")
+                        move_to_errors(msg_path, current_folder,
+                            f"Регистрация не удалась за {max_retries} попыток")
                         retry_count.pop(name, None)
                         totals["FAILED"] += 1
-                    _print_doc_line(idx, len(queue), "FAILED", str(e)[:80])
+                        _print_doc_line(idx, len(queue), "FAILED",
+                                         f"max_retries ({max_retries}) → Ошибки/")
+                    else:
+                        log.warning(f"{name}: фейл {retry_count[name]}/{max_retries} "
+                                    f"— оставляю в корне на следующую итерацию")
+                        _print_doc_line(idx, len(queue), "FAILED",
+                                         f"retry {retry_count[name]}/{max_retries}")
                     try:
                         driver.get(url)
                         wait_asud_loaded(driver)
                     except Exception:
                         pass
+                else:
+                    totals[status] = totals.get(status, 0) + 1
+                    retry_count.pop(name, None)
+                    _print_doc_line(idx, len(queue), status,
+                                     doc.get("тема", "")[:60])
+            except Exception as e:
+                log.error(f"Exception на {name}: {e}")
+                retry_count[name] = retry_count.get(name, 0) + 1
+                if retry_count[name] >= max_retries:
+                    move_to_errors(msg_path, current_folder, f"Exception: {e}")
+                    retry_count.pop(name, None)
+                    totals["FAILED"] += 1
+                _print_doc_line(idx, len(queue), "FAILED", str(e)[:80])
+                try:
+                    driver.get(url)
+                    wait_asud_loaded(driver)
+                except Exception:
+                    pass
+        return len(queue)
+
+    try:
+        while not _stop_flag:
+            totals["ITER"] += 1
+
+            # Какие папки обрабатываем на этом тике
+            if folders_list and round_robin_mode:
+                entry = folders_list[rr_idx % len(folders_list)]
+                rr_idx += 1
+                log.info(f"[итер. {totals['ITER']}] round-robin: "
+                         f"{os.path.basename(entry['dir'])}")
+                tick_folders = [entry]
+            elif folders_list:
+                tick_folders = folders_list
+            else:
+                tick_folders = [{"dir": folder, "output_suffix": output_suffix}]
+
+            processed = 0
+            for entry in tick_folders:
+                if _stop_flag:
+                    break
+                processed += _process_folder(entry["dir"], entry.get("output_suffix"))
+
+            if processed == 0:
+                log.info(f"[итер. {totals['ITER']}] очереди пусты — sleep {interval}s")
 
             if _stop_flag:
                 break
