@@ -42,6 +42,7 @@ from ui import (click, wait_and_click, find_input_near_label,
                 wait_asud_loaded, wait_modal_closed, close_open_modals, js_set_value)
 from correspondent import match_correspondent
 from xlsx_status import mark_status, get_done_asud_ids, COL_HALETSKAYA, COL_OKRUG
+from xlsx_lock import is_xlsx_busy
 
 _log_console = logging.StreamHandler()
 _log_console.setLevel(logging.INFO)
@@ -2379,8 +2380,21 @@ def main():
                     paths_this_tick = xlsx_paths
 
                 changed_files = 0
+                busy_files = 0
                 todo_all = []
                 for xpath in paths_this_tick:
+                    # Приоритет регистрации: если на реестре висит свежий
+                    # .lock (P1-регистратор сейчас пишет новые строки) —
+                    # пропускаем его на этом тике, возвращаемся через
+                    # poll_interval. mark_status в process_one всё равно
+                    # ждёт обычным lock-acquire, но тут мы экономим время
+                    # на чтении большого xlsx в момент когда он точно
+                    # будет освобождён через секунду.
+                    if is_xlsx_busy(xpath):
+                        log.info(f"[итер. {iters}] {os.path.basename(xpath)} занят "
+                                 f"(регистратор пишет?) — пропускаю, попробую на след. тике")
+                        busy_files += 1
+                        continue
                     try:
                         cur_mtime = os.path.getmtime(xpath)
                     except OSError:
