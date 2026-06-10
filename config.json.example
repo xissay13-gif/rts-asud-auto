@@ -27,7 +27,7 @@
       ]
     },
     {
-      "name": "ГИСЖКХ → Халецкая (под Басмановым)",
+      "name": "Басманов → Халецкая (все реестры)",
       "target_account": "Басманов",
       "sidebar_section": "На резолюцию",
       "force_executor": "Халецкая Юлия Владимировна",
@@ -35,6 +35,8 @@
       "stage_date_mode": "calendar",
       "stage_date_days": 3,
       "watch": [
+        {"dir": "D:\\OutlookSubjects\\ОЭК",    "xlsx_pattern": "ОЭК_резолюции.xlsx"},
+        {"dir": "D:\\OutlookSubjects\\ТЭС",    "xlsx_pattern": "ТЭС_резолюции.xlsx"},
         {"dir": "D:\\OutlookSubjects\\ГИСЖКХ", "xlsx_pattern": "ГИСЖКХ_резолюции.xlsx"}
       ]
     }
