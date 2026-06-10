@@ -33,7 +33,8 @@ from shared.xlsx_lock import xlsx_lock, is_xlsx_busy
 from shared.xlsx_status import get_done_asud_ids, mark_status, COL_HALETSKAYA
 from shared.asud_resolution import (
     switch_account, click_sidebar_section, find_doc_row, open_doc_card,
-    click_create_resolution, select_content_template, toggle_switch,
+    click_create_resolution, has_existing_resolution_to,
+    select_content_template, toggle_switch,
     set_stage_date_explicit, compute_control_date,
     fill_executor, click_add_btn, submit_resolution,
     click_complete_button, close_card_after_complete, clear_filter,
@@ -201,6 +202,19 @@ def _process_one(driver, doc, executor_fio, content_template,
     if not open_doc_card(driver, row):
         log.warning(f"  {asud_id}: не открылась карточка")
         return False
+
+    # Защита от дублей: если в карточке уже есть резолюция на этого
+    # исполнителя — синхронизируем xlsx и пропускаем без создания второй.
+    if has_existing_resolution_to(driver, executor_fio):
+        surname = executor_fio.split()[0] if executor_fio else '?'
+        log.info(f"  {asud_id}: уже есть резолюция на {surname} — "
+                 f"синхронизирую xlsx, пропускаю создание дубля")
+        xlsx_p = doc.get('xlsx_path')
+        if xlsx_p:
+            if mark_status(xlsx_p, asud_id, COL_HALETSKAYA):
+                log.debug(f"  → xlsx: {asud_id} помечен «{COL_HALETSKAYA}» (синхрон)")
+        close_card_after_complete(driver)
+        return True  # засчитываем как обработано
 
     if not click_create_resolution(driver):
         log.warning(f"  {asud_id}: 'Создать резолюцию' не сработала")

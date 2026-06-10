@@ -566,6 +566,36 @@ def open_doc_card(driver, row):
 # Выдача резолюции — порт из clean-resolutions
 # ============================================================
 
+def has_existing_resolution_to(driver, executor_fio):
+    """True если в открытой карточке уже есть резолюция на executor_fio.
+
+    По HTML-дампу: панель «Этапы исполнения» отрисовывает выданную резолюцию
+    как <td> содержащий И фамилию исполнителя, И <div class="mainExecutorMark">
+    («отв.исп.»). Используется как защита от дублей — если daemon потерял
+    отметку «Отписано Халецкой» в xlsx (PermissionError, рестарт, ручное
+    создание резолюции человеком), на след. итерации обнаружим резолюцию
+    в самой АСУД и пропустим документ.
+    """
+    if not executor_fio:
+        return False
+    surname = executor_fio.split()[0] if executor_fio else ''
+    if not surname:
+        return False
+    try:
+        xpath = (f"//td[contains(., '{surname}') and "
+                 f".//div[contains(@class, 'mainExecutorMark')]]")
+        cells = driver.find_elements(By.XPATH, xpath)
+        for c in cells:
+            try:
+                if c.is_displayed():
+                    return True
+            except Exception:
+                continue
+    except Exception as e:
+        log.debug(f"has_existing_resolution_to({executor_fio!r}): {e}")
+    return False
+
+
 def click_create_resolution(driver, timeout=10):
     """Клик 'Создать резолюцию' в открытой карточке. id=header-action-btn-add_resolution."""
     try:
