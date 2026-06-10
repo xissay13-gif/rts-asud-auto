@@ -42,6 +42,10 @@ DEFAULTS = {
     # Пресеты сценариев для меню выбора. Каждый пресет может перекрыть любые поля
     # выше (target_account, sidebar_section, force_executor, stage_date_mode/days,
     # resolution_content и т.д.). Меню показывается при старте если presets не пуст.
+    #
+    # Поле "watch" (опционально): список папок с реестрами для multi-folder
+    # daemon-режима (--watch). Без него exe смотрит xlsx рядом с собой.
+    # Формат: [{"dir": "путь", "xlsx_pattern": "имя или маска"}, ...].
     "presets": [
         {
             "name": "Округа → начальницам (под Халецкой)",

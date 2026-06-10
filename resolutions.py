@@ -1582,7 +1582,8 @@ def process_one(driver, doc, index, total):
 
     # Пометка статуса в xlsx (если знаем путь). Колонка определяется по
     # текущему сценарию: ZHKH-преcет → «Отписано Халецкой», иначе → «Отписано в округ».
-    xlsx_path = settings.get("_xlsx_path")
+    # Приоритет: doc['_xlsx_path'] (per-doc — multi-folder режим) → settings (legacy).
+    xlsx_path = doc.get('_xlsx_path') or settings.get("_xlsx_path")
     status_col = settings.get("_status_column")
     if xlsx_path and status_col and doc.get('asud_id'):
         if mark_status(xlsx_path, doc['asud_id'], status_col):
@@ -1812,6 +1813,29 @@ def _apply_preset_to_settings(preset):
             settings[key] = preset[key]
 
 
+def _list_watched_xlsx(watch_list):
+    """Расхлопывает watch-list (list of {dir, xlsx_pattern}) в плоский список
+    абсолютных путей к существующим xlsx-файлам.
+
+    Пропускает временные файлы Excel ($файл.xlsx, ~$файл.xlsx) — Excel
+    создаёт их когда юзер открывает реестр.
+    """
+    import glob
+    out = []
+    for entry in watch_list or []:
+        d = (entry.get("dir") or "").strip()
+        pat = (entry.get("xlsx_pattern") or "*.xlsx").strip()
+        if not d or not os.path.isdir(d):
+            log.debug(f"_list_watched_xlsx: '{d}' — папка не найдена, пропуск")
+            continue
+        for p in glob.glob(os.path.join(d, pat)):
+            name = os.path.basename(p)
+            if name.startswith('~$') or name.startswith('$'):
+                continue
+            out.append(p)
+    return out
+
+
 def _choose_xlsx(base_dir):
     files = [f for f in os.listdir(base_dir) if f.lower().endswith('.xlsx')]
     if not files:
@@ -1935,6 +1959,7 @@ def main():
 
     # Меню пресетов (если есть в конфиге)
     presets = settings.get("presets") or []
+    preset = None
     if presets:
         if args.preset is not None:
             if not (1 <= args.preset <= len(presets)):
@@ -1956,49 +1981,67 @@ def main():
         log.info(f"  контр. срок:  {settings.get('stage_date_mode')} "
                  f"+{settings.get('stage_date_days') or settings.get('workdays')}")
 
+    # === Определяем список xlsx-реестров ====================================
+    # Приоритет:
+    #   1) --xlsx PATH (override всего, один файл)
+    #   2) preset["watch"] (multi-folder, без --xlsx)
+    #   3) интерактивный _choose_xlsx(base_dir) (fallback: один файл рядом с exe)
+    watch_list = preset.get("watch") if preset else None
+    xlsx_paths = []
     if args.xlsx:
         if not os.path.isfile(args.xlsx):
             log.error(f"--xlsx {args.xlsx}: файл не найден")
             sys.exit(1)
-        excel_path = args.xlsx
+        xlsx_paths = [args.xlsx]
+        log.info(f"Реестр (из --xlsx): {args.xlsx}")
+    elif watch_list:
+        xlsx_paths = _list_watched_xlsx(watch_list)
+        if not xlsx_paths:
+            log.error("Из preset.watch не нашлось ни одного xlsx — проверь пути")
+            _block_if_interactive("Enter...")
+            sys.exit(1)
+        log.info(f"Multi-folder режим: {len(xlsx_paths)} реестров из preset.watch")
+        for p in xlsx_paths:
+            log.info(f"  • {p}")
     else:
-        excel_path = _choose_xlsx(base_dir)
-    log.info(f"Реестр: {excel_path}")
+        xlsx_paths = [_choose_xlsx(base_dir)]
+        log.info(f"Реестр: {xlsx_paths[0]}")
 
-    docs = load_excel(excel_path)
-    if not docs:
-        log.error("Реестр пуст")
-        _block_if_interactive("Enter...")
-        sys.exit(1)
-
-    # Если пресет задаёт force_executor — подменяем у всех строк
+    # === Загружаем все реестры в единый docs (с тегом _xlsx_path) ===========
     force_exe = settings.get("force_executor", "").strip()
-    if force_exe:
-        for d in docs:
-            d['executor'] = force_exe
-        log.info(f"Исполнитель для всех {len(docs)} строк подменён: {force_exe}")
-
-    # Какую колонку статуса заполнять в xlsx после успешного process_one:
-    # ZHKH-сценарий (force_executor = Халецкая) → «Отписано Халецкой»
-    # иначе (стандартный flow Халецкая → округ) → «Отписано в округ»
     status_col = COL_HALETSKAYA if 'халецк' in force_exe.lower() else COL_OKRUG
-    settings["_xlsx_path"] = excel_path
     settings["_status_column"] = status_col
+    # Для legacy кода (process_one fallback): первый путь, если single-file
+    settings["_xlsx_path"] = xlsx_paths[0] if len(xlsx_paths) == 1 else None
     log.info(f"Статус в xlsx будет писаться в колонку: «{status_col}»")
 
-    # Skip-already-done: если у строки в реестре уже стоит дата в нужной
-    # status-колонке — этот документ уже отписан, пропускаем.
-    already = get_done_asud_ids(excel_path, status_col)
-    if already:
-        before = len(docs)
-        docs = [d for d in docs if d.get('asud_id') not in already]
-        skipped = before - len(docs)
+    def _load_and_filter(xpath):
+        """Грузит один xlsx, применяет force_executor + filter-already-done.
+        Каждой строке проставляет _xlsx_path для роутинга mark_status."""
+        d_list = load_excel(xpath) or []
+        if force_exe:
+            for d in d_list:
+                d['executor'] = force_exe
+        already = get_done_asud_ids(xpath, status_col)
+        before = len(d_list)
+        d_list = [d for d in d_list if d.get('asud_id') not in already]
+        skipped = before - len(d_list)
         if skipped:
-            log.info(f"Пропускаю {skipped} уже отписанных строк (есть отметка в «{status_col}»)")
-        if not docs:
-            log.info("Все строки реестра уже отписаны — нечего делать")
-            _block_if_interactive("Enter...")
-            return
+            log.info(f"  {os.path.basename(xpath)}: пропуск {skipped} уже отписанных")
+        for d in d_list:
+            d['_xlsx_path'] = xpath
+        return d_list
+
+    docs = []
+    for xp in xlsx_paths:
+        docs.extend(_load_and_filter(xp))
+
+    if not docs and not args.watch:
+        log.info("Все реестры пусты или уже отработаны — нечего делать")
+        _block_if_interactive("Enter...")
+        return
+    if force_exe:
+        log.info(f"Исполнитель подменён для всех строк: {force_exe}")
 
     # Превью
     print(f"\nПервые 5:")
@@ -2156,14 +2199,22 @@ def main():
         # === DAEMON-режим: продолжаем опрашивать xlsx до Ctrl+C ===========
         if args.watch and not _stop_flag:
             log.info("=" * 60)
-            log.info(f"WATCH-режим: опрашиваю {excel_path} каждые "
-                     f"{args.poll_interval}с. Ctrl+C для остановки.")
+            if len(xlsx_paths) > 1:
+                log.info(f"WATCH-режим: опрашиваю {len(xlsx_paths)} реестров "
+                         f"каждые {args.poll_interval}с. Ctrl+C для остановки.")
+            else:
+                log.info(f"WATCH-режим: опрашиваю {xlsx_paths[0]} каждые "
+                         f"{args.poll_interval}с. Ctrl+C для остановки.")
             log.info("=" * 60)
 
-            try:
-                last_mtime = os.path.getmtime(excel_path)
-            except OSError:
-                last_mtime = 0
+            # mtime-кэш per-file. После первого прохода знаем mtime каждого
+            # файла — на след. итерации перечитываем только те где mtime изменился.
+            mtime_cache = {}
+            for xp in xlsx_paths:
+                try:
+                    mtime_cache[xp] = os.path.getmtime(xp)
+                except OSError:
+                    mtime_cache[xp] = 0
             iters = 0
 
             while not _stop_flag:
@@ -2197,40 +2248,33 @@ def main():
                             continue
                     last_heartbeat = time.monotonic()
 
-                # mtime-кэш: если файл не менялся — реестр не перечитываем
-                try:
-                    cur_mtime = os.path.getmtime(excel_path)
-                except OSError:
-                    log.debug(f"[итер. {iters}] xlsx недоступен — sleep")
-                    continue
-                if cur_mtime == last_mtime:
-                    log.debug(f"[итер. {iters}] xlsx не менялся — skip read")
-                    continue
-                last_mtime = cur_mtime
+                # Multi-file: собираем todo со всех реестров, у которых mtime
+                # изменился. Если изменился хоть один — есть смысл крутить дальше.
+                changed_files = 0
+                todo_all = []
+                for xpath in xlsx_paths:
+                    try:
+                        cur_mtime = os.path.getmtime(xpath)
+                    except OSError:
+                        continue  # файл сейчас недоступен — пропустим этот раунд
+                    if cur_mtime == mtime_cache.get(xpath, 0):
+                        continue
+                    mtime_cache[xpath] = cur_mtime
+                    changed_files += 1
+                    todo_all.extend(_load_and_filter(xpath))
 
-                # Перечитываем реестр и фильтруем
-                new_docs = load_excel(excel_path) or []
-                if force_exe:
-                    for d in new_docs:
-                        d['executor'] = force_exe
-                already_now = get_done_asud_ids(excel_path, status_col)
-                new_docs = [d for d in new_docs
-                            if d.get('asud_id') and d.get('asud_id') not in already_now
-                            and d.get('executor')]
-
-                if not new_docs:
-                    log.debug(f"[итер. {iters}] todo пусто после фильтра")
+                if not todo_all:
+                    log.debug(f"[итер. {iters}] изменилось файлов: {changed_files}, todo: 0")
                     continue
 
-                log.info(f"[итер. {iters}] todo: {len(new_docs)} новых документов")
-                batch_ok = _process_batch(new_docs)
+                log.info(f"[итер. {iters}] todo: {len(todo_all)} документов "
+                         f"из {changed_files} изменённых реестров")
+                batch_ok = _process_batch(todo_all)
                 if not batch_ok:
                     log.warning(f"[итер. {iters}] batch прерван driver-crash'ем "
                                 f"— непрошедшие документы попробуем на след. итерации")
-                    # mtime НЕ сбрасываем — на след. итерации увидим что
-                    # mtime не изменился, но всё равно зайдём через ensure_driver
-                    # и переобработаем (force через сброс кэша)
-                    last_mtime = 0
+                    # Сбрасываем mtime-кэш чтобы на след. итерации перечитать ВСЁ
+                    mtime_cache = {p: 0 for p in xlsx_paths}
         # === END daemon =====================================================
 
         elapsed_seconds = time.monotonic() - start_time

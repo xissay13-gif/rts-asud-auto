@@ -54,6 +54,7 @@ jobs:
         Copy-Item asud_resolutions_zhkh.bat dist\release\ -ErrorAction SilentlyContinue
         Copy-Item asud_resolutions_okrug_watch.bat dist\release\ -ErrorAction SilentlyContinue
         Copy-Item asud_resolutions_zhkh_watch.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item config.json.example dist\release\ -ErrorAction SilentlyContinue
 
     - name: Zip release
       shell: pwsh
