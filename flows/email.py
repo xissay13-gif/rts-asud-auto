@@ -87,6 +87,33 @@ def _fix_mojibake(s):
     return s
 
 
+# ================= FOLDER CHECK WITH RETRY =================
+
+def _wait_for_folder(folder, retries=4, delays=(0, 2, 5, 10)):
+    """os.path.isdir с retry-backoff. Нужно для UNC-путей (\\\\server\\share)
+    у которых первый доступ может уйти в timeout (DNS resolve + Kerberos
+    handshake + проверка прав занимают несколько секунд после холодного
+    старта процесса).
+
+    Симптом без этого: запуск exe → 'Папка не найдена', повторный запуск
+    через 20с → всё работает. Воспроизведено в C:\\files\\ASUD\\Logs от
+    10.06.2026 (UNC \\\\interrao.ru\\oms10\\...).
+
+    Возвращает True если папка стала доступна, False после всех попыток.
+    """
+    import time as _time
+    for attempt, delay in enumerate(delays[:retries]):
+        if delay:
+            log.info(f"Папка {folder!r}: попытка {attempt+1}/{retries} "
+                     f"через {delay}с (UNC холодный старт?)")
+            _time.sleep(delay)
+        if os.path.isdir(folder):
+            if attempt > 0:
+                log.info(f"Папка появилась после {attempt} ретраев")
+            return True
+    return False
+
+
 # ================= EMAIL → DOC_DATA =================
 
 # Имя .msg-файла начинается с даты-времени: '2026-05-06 10-58-43.msg'
@@ -486,8 +513,8 @@ def main():
     user_dir = input("Путь: ").strip().strip('"').strip("'")
     folder = user_dir or default
 
-    if not folder or not os.path.isdir(folder):
-        log.error(f"Папка не найдена: {folder!r}")
+    if not folder or not _wait_for_folder(folder):
+        log.error(f"Папка не найдена (после ретраев): {folder!r}")
         input("Enter...")
         sys.exit(1)
 
@@ -692,8 +719,8 @@ def daemon_main():
         print(f"Enter — использовать: {default}")
     user_dir = input("Путь: ").strip().strip('"').strip("'")
     folder = user_dir or default
-    if not folder or not os.path.isdir(folder):
-        log.error(f"Папка не найдена: {folder!r}")
+    if not folder or not _wait_for_folder(folder):
+        log.error(f"Папка не найдена (после ретраев): {folder!r}")
         input("Enter...")
         sys.exit(1)
 
