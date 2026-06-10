@@ -409,8 +409,13 @@ def load_excel(file_path):
 #
 # АСУД-якоря (стабильные id/атрибуты, не зависят от viewport/headless):
 #
-#   #app-acc-icon-myprofile        — иконка-триггер в шапке (45×45), клик
-#                                     открывает выпадашку со списком учёток
+#   #show-another-user-icon         — стрелка вниз (16×16, title="Выбрать
+#                                     учетную запись"). Клик по НЕЙ открывает
+#                                     выпадашку со списком учёток.
+#
+#   #app-acc-icon-myprofile         — аватарка пользователя (45×45,
+#                                     title="Учетная запись"). НЕ кликабельна
+#                                     для смены учётки — это просто иконка.
 #
 #   span#app-acc-info[x-account-name="..."]  — отображает ФИО учётки.
 #                                     ЕСТЬ И В ШАПКЕ (текущая), И В ВЫПАДАШКЕ
@@ -504,7 +509,7 @@ def switch_account(driver, target_substring):
     """Переключение учётки через выпадашку профиля.
 
     1. _account_active(timeout=10) — если уже на нужной учётке, выходим
-    2. Клик по #app-acc-icon-myprofile (триггер выпадашки)
+    2. Клик по #show-another-user-icon (стрелка-триггер выпадашки)
     3. Ждём появления target_substring в выпадашке (in_popup)
     4. Клик по спану учётки
     5. Пост-верификация: _account_active(timeout=30)
@@ -518,16 +523,17 @@ def switch_account(driver, target_substring):
     current = _current_account_text(driver)
     log.info(f"Текущая учётка в шапке: '{current or '?'}'")
 
-    # 1. Клик по триггеру
+    # 1. Клик по стрелке-триггеру выпадашки. ВАЖНО: НЕ #app-acc-icon-myprofile
+    # (та — просто аватарка пользователя, клик ничего не открывает).
     try:
-        trigger = driver.find_element(By.ID, "app-acc-icon-myprofile")
+        trigger = driver.find_element(By.ID, "show-another-user-icon")
     except Exception:
-        log.error("Триггер #app-acc-icon-myprofile не найден — старый АСУД?")
+        log.error("Триггер #show-another-user-icon не найден — старый АСУД?")
         return False
     if not trigger.is_displayed():
-        log.error("Триггер #app-acc-icon-myprofile невидим")
+        log.error("Триггер #show-another-user-icon невидим")
         return False
-    click(driver, trigger, "иконка профиля")
+    click(driver, trigger, "стрелка «Выбрать учётную запись»")
 
     # 2. Ждём появления нужной учётки в выпадашке
     try:
