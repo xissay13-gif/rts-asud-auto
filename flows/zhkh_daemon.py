@@ -145,20 +145,40 @@ def _read_todo(xlsx_path, status_column=COL_HALETSKAYA):
     return out
 
 
-def _list_watched_xlsx(watch_list):
-    """Расхлопывает watch-list (list of {dir, xlsx_pattern}) в список xlsx-путей."""
+def _list_watched_xlsx(watch_list, verbose=False):
+    """Расхлопывает watch-list (list of {dir, xlsx_pattern}) в список xlsx-путей.
+
+    verbose=True (на старте daemon'а) — пишет в лог почему пропускается
+    каждая запись если она не отдала ни одного файла. По умолчанию (в loop)
+    скипает молча чтобы не флудить.
+    """
     out = []
     for entry in watch_list or []:
         d = (entry.get("dir") or "").strip()
         pat = (entry.get("xlsx_pattern") or "*.xlsx").strip()
-        if not d or not os.path.isdir(d):
+        if not d:
+            if verbose:
+                log.warning(f"watch-entry без поля 'dir': {entry!r}")
             continue
+        if not os.path.isdir(d):
+            if verbose:
+                # Помогаем юзеру понять что именно не так.
+                # repr() покажет странные символы (mojibake/BOM/непечатные).
+                hint = "сетевая шара не примонтирована?" if d[:2] in (r"\\", "//") \
+                       else "проверь правильность пути и экранирование \\\\ в JSON"
+                log.error(f"watch.dir не существует: {d!r} ({hint})")
+            continue
+        found = 0
         for p in glob.glob(os.path.join(d, pat)):
             # Скип временных файлов Excel ($файл.xlsx, ~$файл.xlsx)
             name = os.path.basename(p)
             if name.startswith('~$') or name.startswith('$'):
                 continue
             out.append(p)
+            found += 1
+        if verbose and found == 0:
+            log.warning(f"watch.dir {d!r}: папка есть, но '{pat}' не нашёл "
+                        f"ни одного файла")
     return out
 
 
@@ -297,6 +317,19 @@ def main():
     log.info(f"  poll: каждые {poll_interval}с")
     log.info(f"  executor: {executor}, content: {content_tpl}, fallback: today+{fb_days} кал.дн.")
     log.info("=" * 60)
+
+    # Проверка watch-путей на старте: если папка не существует / xlsx не нашёлся
+    # — вылетит ERROR в логе с подсказкой. Без этого юзер видит только эхо
+    # конфига и потом тихое «нет xlsx ни в одной watch-папке».
+    initial_paths = _list_watched_xlsx(watch_list, verbose=True)
+    if initial_paths:
+        log.info(f"Watch-старт: найдено {len(initial_paths)} реестров")
+        for p in initial_paths:
+            log.info(f"  ✓ {p}")
+    else:
+        log.warning("Watch-старт: ни одного реестра не найдено. "
+                    "Daemon всё равно стартует — будет переопрашивать каждые "
+                    f"{poll_interval}с (на случай если папки появятся позже).")
 
     signal.signal(signal.SIGINT, _on_sigint)
     try:
