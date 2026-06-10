@@ -799,26 +799,55 @@ def fill_executor(driver, fio):
             pass
         for ch in surname:
             inp.send_keys(ch)
+        # Debounce: GXT-combobox дёргает autocomplete по keypause; без
+        # задержки send_keys возвращается мгновенно и поллинг кандидатов
+        # стартует в пустом DOM.
+        time.sleep(0.3)
         log.info(f"Введена фамилия исполнителя: {surname}")
+
+        # Фильтр: текст должен быть похож на ФИО (≥2 кириллических слова с
+        # большой буквы — полные или инициалы Ю.В.). Иначе WebDriverWait
+        # моментально пройдёт по лейблам/заголовкам где фамилия уже есть,
+        # и mat_correspondent ничего не найдёт.
+        import re as _re
+        _fio_word = _re.compile(r'^[А-ЯЁ](?:[а-яё]+|\.?)$')
+        def _looks_like_fio(text):
+            txt = (text or '').strip()
+            if not txt or len(txt) > 120:
+                return False
+            words = [w for w in _re.split(r'\s+|(?<=\.)', txt) if w.strip(' .')]
+            named = sum(1 for w in words
+                        if _fio_word.match(w.rstrip('.') + ('.' if w.endswith('.') else '')))
+            return named >= 2
 
         def _candidates():
             results = driver.find_elements(By.XPATH,
                 f"//*[contains(text(),'{surname}')]")
-            return [r for r in results
-                    if r.is_displayed() and r != inp
-                    and r.tag_name.lower() != 'input']
+            out = []
+            for r in results:
+                if r == inp or r.tag_name.lower() == 'input':
+                    continue
+                try:
+                    if not r.is_displayed():
+                        continue
+                    if not _looks_like_fio((r.text or '').strip()):
+                        continue
+                    out.append(r)
+                except Exception:
+                    continue
+            return out
 
+        # 15с — серверный autocomplete АСУД после переключения учётки/
+        # холодного старта иногда отвечает 6-10с. Enter-fallback убран:
+        # он закрывает выпадашку и фиксирует пустое значение, потом
+        # повторный wait зависает в принципе.
         candidates = []
         try:
-            WebDriverWait(driver, 5).until(lambda d: len(_candidates()) > 0)
+            WebDriverWait(driver, 15).until(lambda d: len(_candidates()) > 0)
             candidates = _candidates()
         except Exception:
-            try:
-                inp.send_keys(Keys.ENTER)
-                WebDriverWait(driver, 3).until(lambda d: len(_candidates()) > 0)
-                candidates = _candidates()
-            except Exception:
-                pass
+            log.error(f"Выпадашка 'Исполнитель' не появилась за 15с после ввода '{surname}'")
+            return False
 
         log.info(f"Кандидатов: {len(candidates)}")
         target = None
