@@ -1425,6 +1425,45 @@ def submit_resolution(driver):
     return True
 
 
+def click_complete_button(driver, timeout=10):
+    """Клик по кнопке «Завершить» в открытой карточке.
+
+    Стабильный id — `header-action-btn-finish_task` (по HTML-дампу).
+    Без неё документ остаётся «в работе» у Халецкой/Басманова даже после
+    выдачи резолюции — формально для них задача не закрыта. С «Завершить»
+    карточка уходит в «Завершённые» и больше не отвлекает.
+    """
+    log.info("Ищу кнопку 'Завершить'")
+    try:
+        btn = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.ID, "header-action-btn-finish_task")))
+    except Exception:
+        log.warning("Кнопка 'Завершить' (#header-action-btn-finish_task) не появилась "
+                    "за {timeout}с — возможно документ уже завершён")
+        return False
+    click(driver, btn, "Завершить")
+    log.info("Кнопка 'Завершить' нажата")
+    return True
+
+
+def close_card_after_complete(driver):
+    """После клика по 'Завершить' карточка должна закрыться сама.
+    Safety net: если осталась открыта — кликаем header-close-btn.
+    """
+    # Сначала ждём что главная вернулась сама
+    try:
+        WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.ID, "mainscreen-create-button")))
+        log.info("[close] карточка закрылась сама после «Завершить»")
+        return
+    except Exception:
+        pass
+
+    # Резерв — клик по крестику (используем существующую функцию)
+    log.info("[close] карточка ещё открыта после «Завершить», fallback на header-close-btn")
+    close_card_after_resolution(driver)
+
+
 def close_card_after_resolution(driver):
     """После выдачи резолюции возвращаемся в список через #header-close-btn."""
     # Ждём пока header-close-btn появится (карточка всё ещё открыта) —
@@ -1570,9 +1609,16 @@ def process_one(driver, doc, index, total):
         return False
     log.debug(f"  Шаг 10 OK ({time.monotonic()-t_start:.1f}s)")
 
-    # 11. Закрыть карточку (если осталась открыта)
-    log.info(f"--- ШАГ 11/12: закрытие карточки ---")
-    close_card_after_resolution(driver)
+    # 11. «Завершить» — переводит задачу в «Завершённые» (а не просто
+    # закрывает карточку как раньше). Иначе документ остаётся «в работе»
+    # у Халецкой и продолжает висеть в списке резолюций.
+    # Fallback: если кнопка не появилась (документ уже завершён или
+    # карточка не в том состоянии) — обычное закрытие через крестик.
+    log.info(f"--- ШАГ 11/12: «Завершить» + закрытие карточки ---")
+    if click_complete_button(driver):
+        close_card_after_complete(driver)
+    else:
+        close_card_after_resolution(driver)
     log.debug(f"  Шаг 11 OK ({time.monotonic()-t_start:.1f}s)")
 
     # 12. Очистить фильтр для следующей итерации
