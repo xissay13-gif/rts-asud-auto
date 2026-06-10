@@ -310,6 +310,11 @@ def _parse_one_msg(msg_path, process_mode="mix"):
 
     clean_subject = re.sub(r'^(FW:|RE:|Fwd:)\s*', '',
                             str(subject).strip(), flags=re.IGNORECASE)
+    # ГИС ЖКХ: если тема приехала без префикса (начинается сразу с номера
+    # обращения вроде «55-2026-36415 ул. ...») — допишем «ГИС ЖКХ» вперёд
+    # для единообразия в реестре и в карточке АСУД.
+    if zhkh and not re.match(r'^\s*ГИС\s*ЖКХ', clean_subject, re.IGNORECASE):
+        clean_subject = f"ГИС ЖКХ {clean_subject}"
     body_clean = mix_flow._clean_body(body) if body else clean_subject
 
     if zhkh:
