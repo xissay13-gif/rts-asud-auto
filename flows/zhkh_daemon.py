@@ -29,7 +29,7 @@ from selenium.webdriver.edge.service import Service as EdgeService
 
 from shared import config as cfg
 from shared.ui import wait_asud_loaded, set_driver_timeout
-from shared.xlsx_lock import xlsx_lock
+from shared.xlsx_lock import xlsx_lock, is_xlsx_busy
 from shared.xlsx_status import get_done_asud_ids, mark_status, COL_HALETSKAYA
 from shared.asud_resolution import (
     switch_account, click_sidebar_section, find_doc_row, open_doc_card,
@@ -401,7 +401,16 @@ def main():
 
             todo_all = []
             changed_files = 0
+            busy_files = 0
             for xpath in paths_this_tick:
+                # Приоритет регистрации: если рядом с реестром свежий .lock
+                # (P1-регистратор пишет новые строки) — пропускаем на этом
+                # тике, вернёмся через poll_interval.
+                if is_xlsx_busy(xpath):
+                    log.info(f"[итер. {iters}] {os.path.basename(xpath)} занят "
+                             f"(регистратор пишет?) — пропускаю до след. тика")
+                    busy_files += 1
+                    continue
                 try:
                     cur_mtime = os.path.getmtime(xpath)
                 except OSError:

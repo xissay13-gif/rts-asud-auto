@@ -32,6 +32,28 @@ LOCK_STALE_SECONDS = 60
 LOCK_POLL_INTERVAL = 0.2
 
 
+def is_xlsx_busy(xlsx_path):
+    """Не-блокирующая проверка: занят ли xlsx другим процессом прямо сейчас.
+
+    Возвращает True если рядом с xlsx есть свежий .lock-файл (моложе
+    LOCK_STALE_SECONDS). Используется для приоритизации регистрации:
+    daemon-resolutions видит что регистратор пишет в реестр, пропускает
+    его на этом тике и берётся за другие файлы.
+
+    NB: это подсказка. Между проверкой и реальной попыткой взять
+    lock остаётся race-window — если другой процесс пробрался в этот
+    промежуток, наша попытка acquire будет ждать обычным образом.
+    """
+    if not xlsx_path:
+        return False
+    lock_path = xlsx_path + ".lock"
+    try:
+        age = time.time() - os.path.getmtime(lock_path)
+        return age < LOCK_STALE_SECONDS
+    except OSError:
+        return False
+
+
 @contextmanager
 def xlsx_lock(xlsx_path, timeout=30):
     """Кооперативный exclusive lock на xlsx через сосед-файл `<path>.lock`.
