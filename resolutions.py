@@ -1465,6 +1465,39 @@ def close_card_after_complete(driver):
     close_card_after_resolution(driver)
 
 
+def has_existing_resolution_to(driver, executor_fio):
+    """True если в открытой карточке уже есть резолюция на executor_fio.
+
+    Детект по HTML-дампу АСУД: в панели «Этапы исполнения» каждая выданная
+    резолюция отрисовывается как <td>, содержащий и фамилию исполнителя,
+    и <div class="mainExecutorMark">отв.исп.</div>.
+
+    Используется как защита от дублирования: если P3-daemon потерял
+    отметку «Отписано Халецкой» (mark_status упал, юзер открыл xlsx
+    в Excel и т.п.) — на следующей итерации он откроет карточку
+    и обнаружит что резолюция уже есть → пропустит без создания дубля.
+    """
+    if not executor_fio:
+        return False
+    surname = executor_fio.split()[0] if executor_fio else ''
+    if not surname:
+        return False
+    try:
+        # td содержащий И фамилию (текст) И mainExecutorMark (дочерний div)
+        xpath = (f"//td[contains(., '{surname}') and "
+                 f".//div[contains(@class, 'mainExecutorMark')]]")
+        cells = driver.find_elements(By.XPATH, xpath)
+        for c in cells:
+            try:
+                if c.is_displayed():
+                    return True
+            except Exception:
+                continue
+    except Exception as e:
+        log.debug(f"has_existing_resolution_to({executor_fio!r}): {e}")
+    return False
+
+
 def close_card_after_resolution(driver):
     """После выдачи резолюции возвращаемся в список через #header-close-btn."""
     # Ждём пока header-close-btn появится (карточка всё ещё открыта) —
@@ -1541,6 +1574,24 @@ def process_one(driver, doc, index, total):
     if not open_doc_card(driver, row):
         return False
     log.debug(f"  Шаг 2 OK ({time.monotonic()-t_start:.1f}s)")
+
+    # 2.5. Защита от дублирования: если в карточке уже есть резолюция на
+    # того же исполнителя — не создаём вторую. Возможные причины расхождения
+    # xlsx vs АСУД: mark_status упал (PermissionError), кто-то выдал резолюцию
+    # вручную в АСУД мимо нашего daemon'а, рестарт без чтения статуса.
+    if has_existing_resolution_to(driver, doc.get('executor')):
+        surname = doc['executor'].split()[0] if doc.get('executor') else '?'
+        log.info(f"Row {doc['row_idx']}: документ уже имеет резолюцию на "
+                 f"{surname} — пропускаю + синхронизирую xlsx")
+        # Помечаем в xlsx чтобы daemon в след. раз не пытался открыть снова
+        xlsx_path = doc.get('_xlsx_path') or settings.get("_xlsx_path")
+        status_col = settings.get("_status_column")
+        if xlsx_path and status_col and doc.get('asud_id'):
+            if mark_status(xlsx_path, doc['asud_id'], status_col):
+                log.debug(f"  → xlsx: {doc['asud_id']} помечен «{status_col}» (синхрон)")
+        # Закрываем карточку, возвращаемся в список
+        close_card_after_resolution(driver)
+        return True  # засчитываем как «обработано» (резолюция и так есть)
 
     # 3. Создать резолюцию
     log.info(f"--- ШАГ 3/12: кнопка 'Создать резолюцию' ---")
