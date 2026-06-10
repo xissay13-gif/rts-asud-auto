@@ -1813,9 +1813,14 @@ def _apply_preset_to_settings(preset):
             settings[key] = preset[key]
 
 
-def _list_watched_xlsx(watch_list):
+def _list_watched_xlsx(watch_list, verbose=False):
     """Расхлопывает watch-list (list of {dir, xlsx_pattern}) в плоский список
     абсолютных путей к существующим xlsx-файлам.
+
+    verbose=True (на старте) — пишет в лог почему пропустил каждую запись.
+    Без этого юзер видит «watch: ...» в шапке и потом тихое отсутствие файлов,
+    непонятно — папка не существует, или файл с другим именем, или шара
+    не примонтирована.
 
     Пропускает временные файлы Excel ($файл.xlsx, ~$файл.xlsx) — Excel
     создаёт их когда юзер открывает реестр.
@@ -1825,14 +1830,28 @@ def _list_watched_xlsx(watch_list):
     for entry in watch_list or []:
         d = (entry.get("dir") or "").strip()
         pat = (entry.get("xlsx_pattern") or "*.xlsx").strip()
-        if not d or not os.path.isdir(d):
-            log.debug(f"_list_watched_xlsx: '{d}' — папка не найдена, пропуск")
+        if not d:
+            if verbose:
+                log.warning(f"watch-entry без поля 'dir': {entry!r}")
             continue
+        if not os.path.isdir(d):
+            if verbose:
+                hint = "сетевая шара не примонтирована?" if d[:2] in (r"\\", "//") \
+                       else "проверь правильность пути и экранирование \\\\ в JSON"
+                log.error(f"watch.dir не существует: {d!r} ({hint})")
+            else:
+                log.debug(f"_list_watched_xlsx: '{d}' — папка не найдена, пропуск")
+            continue
+        found = 0
         for p in glob.glob(os.path.join(d, pat)):
             name = os.path.basename(p)
             if name.startswith('~$') or name.startswith('$'):
                 continue
             out.append(p)
+            found += 1
+        if verbose and found == 0:
+            log.warning(f"watch.dir {d!r}: папка есть, но '{pat}' не нашёл "
+                        f"ни одного файла")
     return out
 
 
@@ -1995,14 +2014,24 @@ def main():
         xlsx_paths = [args.xlsx]
         log.info(f"Реестр (из --xlsx): {args.xlsx}")
     elif watch_list:
-        xlsx_paths = _list_watched_xlsx(watch_list)
+        # verbose=True — диагностика на старте (почему именно не нашлось)
+        xlsx_paths = _list_watched_xlsx(watch_list, verbose=True)
         if not xlsx_paths:
-            log.error("Из preset.watch не нашлось ни одного xlsx — проверь пути")
-            _block_if_interactive("Enter...")
-            sys.exit(1)
-        log.info(f"Multi-folder режим: {len(xlsx_paths)} реестров из preset.watch")
-        for p in xlsx_paths:
-            log.info(f"  • {p}")
+            if args.watch:
+                # В daemon-режиме не выходим — папки могут появиться позже
+                # (сетевая шара, отложенное создание реестров).
+                log.warning("Из preset.watch не нашлось ни одного xlsx — "
+                            "daemon стартует, будет проверять каждые "
+                            f"{args.poll_interval}с")
+                xlsx_paths = []  # пустой, но daemon будет переопрашивать
+            else:
+                log.error("Из preset.watch не нашлось ни одного xlsx — проверь пути")
+                _block_if_interactive("Enter...")
+                sys.exit(1)
+        else:
+            log.info(f"Multi-folder режим: {len(xlsx_paths)} реестров из preset.watch")
+            for p in xlsx_paths:
+                log.info(f"  • {p}")
     else:
         xlsx_paths = [_choose_xlsx(base_dir)]
         log.info(f"Реестр: {xlsx_paths[0]}")
@@ -2202,9 +2231,12 @@ def main():
             if len(xlsx_paths) > 1:
                 log.info(f"WATCH-режим: опрашиваю {len(xlsx_paths)} реестров "
                          f"каждые {args.poll_interval}с. Ctrl+C для остановки.")
-            else:
+            elif xlsx_paths:
                 log.info(f"WATCH-режим: опрашиваю {xlsx_paths[0]} каждые "
                          f"{args.poll_interval}с. Ctrl+C для остановки.")
+            else:
+                log.info(f"WATCH-режим: реестров пока нет, жду появления "
+                         f"(проверка каждые {args.poll_interval}с)")
             log.info("=" * 60)
 
             # mtime-кэш per-file. После первого прохода знаем mtime каждого
@@ -2216,6 +2248,11 @@ def main():
                 except OSError:
                     mtime_cache[xp] = 0
             iters = 0
+            # Сколько итераций назад пере-резолвили watch_list. Делаем это
+            # раз в ~5 минут чтобы подхватить вновь появившиеся файлы
+            # (сетевая шара примонтировалась, юзер создал реестр в новой папке).
+            last_watch_rescan = time.monotonic()
+            WATCH_RESCAN_INTERVAL = 300
 
             while not _stop_flag:
                 _interruptible_sleep(args.poll_interval)
@@ -2247,6 +2284,21 @@ def main():
                             _interruptible_sleep(60)
                             continue
                     last_heartbeat = time.monotonic()
+
+                # Раз в WATCH_RESCAN_INTERVAL пере-резолвим watch_list:
+                # может за это время примонтировалась шара / появился реестр
+                # в новой папке. Только в multi-folder режиме (watch_list задан).
+                if watch_list and time.monotonic() - last_watch_rescan > WATCH_RESCAN_INTERVAL:
+                    new_paths = _list_watched_xlsx(watch_list)
+                    added = [p for p in new_paths if p not in mtime_cache]
+                    if added:
+                        log.info(f"[итер. {iters}] watch-rescan: появились новые "
+                                 f"реестры ({len(added)})")
+                        for p in added:
+                            log.info(f"  + {p}")
+                            mtime_cache[p] = 0
+                        xlsx_paths = new_paths
+                    last_watch_rescan = time.monotonic()
 
                 # Multi-file: собираем todo со всех реестров, у которых mtime
                 # изменился. Если изменился хоть один — есть смысл крутить дальше.
