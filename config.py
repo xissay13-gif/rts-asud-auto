@@ -14,6 +14,9 @@ log = logging.getLogger("asud.config")
 DEFAULTS = {
     "asud_url": "https://asud.interrao.ru/asudik/",
     "timeout": 20,
+    # Интервал опроса xlsx-реестров в --watch (daemon-режим), в секундах.
+    # Переопределяется флагом --poll-interval.
+    "poll_interval_sec": 300,
     # Учётка под которой работает Халецкая (на которую переключаемся при старте).
     # Поиск пункта в выпадашке профиля по подстроке этого ФИО.
     "target_account": "Халецкая",

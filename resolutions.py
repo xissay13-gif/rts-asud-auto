@@ -2000,8 +2000,10 @@ def main():
                         help="Непрерывный мониторинг xlsx (daemon-режим). "
                              "После одного прохода не выходит, а ждёт новых "
                              "строк. Ctrl+C — корректная остановка.")
-    parser.add_argument('--poll-interval', type=int, default=30, metavar='SEC',
-                        help="Интервал поллинга xlsx в --watch режиме (по умолчанию 30с)")
+    parser.add_argument('--poll-interval', type=int, default=None, metavar='SEC',
+                        help="Интервал поллинга xlsx в --watch режиме. "
+                             "По умолчанию — из config.json (poll_interval_sec), "
+                             "либо 300с (5 мин). Флаг переопределяет JSON.")
     args = parser.parse_args()
 
     # Любой batch-флаг → unattended-режим: не зависаем на input("Enter...")
@@ -2009,6 +2011,11 @@ def main():
 
     settings = cfg.load()
     cfg.keep_system_awake(True)
+
+    # Резолвим poll-interval: --poll-interval > config.json::poll_interval_sec > DEFAULTS
+    if args.poll_interval is None:
+        args.poll_interval = int(settings.get("poll_interval_sec",
+                                              cfg.DEFAULTS.get("poll_interval_sec", 300)))
 
     log.info("=" * 50)
     log.info("АСУД ИК — выдача резолюций")

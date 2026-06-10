@@ -3,6 +3,9 @@
 
   "asud_url": "https://asud.interrao.ru/asudik/",
 
+  "_comment_poll": "Интервал опроса xlsx-реестров в --watch (daemon-режим), в секундах. По умолчанию 300 (5 мин). Переопределяется флагом --poll-interval.",
+  "poll_interval_sec": 300,
+
   "_comment_presets": "Каждый пресет — отдельный сценарий в меню при запуске asud_resolutions.exe без --preset. Поля: name (имя в меню), target_account (учётка АСУД на которую переключиться, поиск по подстроке в ФИО), sidebar_section (раздел сайдбара куда заходим: «Исполнение» для Халецкой → округа, «На резолюцию» для Басманова → Халецкая), force_executor (если задан — подменяет исполнителя у всех строк реестра, иначе берётся из колонки ФИО или по округу), resolution_content (текст шаблона из выпадашки «Содержание»), stage_date_mode ('workdays'/'calendar'), stage_date_days (срок). Опциональное поле watch — список папок для multi-folder daemon-режима (--watch). Без него exe смотрит xlsx рядом с собой.",
 
   "presets": [
