@@ -297,6 +297,8 @@ def main():
     req_report      = bool(dcfg.get("require_report", True))
     ctrl_res        = bool(dcfg.get("control_resolution", True))
     fb_days         = int(dcfg.get("fallback_days", 3))
+    round_robin     = bool(dcfg.get("round_robin", False))
+    rr_idx          = 0
 
     if not watch_list:
         log.error("zhkh_daemon.watch пуст. Укажи папки и xlsx-pattern в settings.json.")
@@ -314,7 +316,8 @@ def main():
     log.info(f"ZHKH-DAEMON: запуск (учётка {switch_to})")
     for entry in watch_list:
         log.info(f"  watch: {entry.get('dir')!r} pattern={entry.get('xlsx_pattern')!r}")
-    log.info(f"  poll: каждые {poll_interval}с")
+    log.info(f"  poll: каждые {poll_interval}с"
+             + (" (round-robin по реестрам)" if round_robin else ""))
     log.info(f"  executor: {executor}, content: {content_tpl}, fallback: today+{fb_days} кал.дн.")
     log.info("=" * 60)
 
@@ -383,9 +386,22 @@ def main():
                 _interruptible_sleep(poll_interval)
                 continue
 
+            # Round-robin (опционально): каждый тик берём ОДИН реестр в
+            # порядке списка. Удобно когда хочется чёткое расписание
+            # «тик1=ОЭК, тик2=ТЭС, тик3=ГИСЖКХ, тик4=ОЭК...».
+            # Дефолт — ALL (все реестры на каждом тике + mtime-кэш).
+            if round_robin and xlsx_paths:
+                cur_xpath = xlsx_paths[rr_idx % len(xlsx_paths)]
+                rr_idx += 1
+                log.info(f"[итер. {iters}] round-robin: проверяю "
+                         f"{os.path.basename(cur_xpath)}")
+                paths_this_tick = [cur_xpath]
+            else:
+                paths_this_tick = xlsx_paths
+
             todo_all = []
             changed_files = 0
-            for xpath in xlsx_paths:
+            for xpath in paths_this_tick:
                 try:
                     cur_mtime = os.path.getmtime(xpath)
                 except OSError:
