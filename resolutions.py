@@ -1161,27 +1161,62 @@ def fill_executor(driver, fio):
         inp.clear()
         for ch in surname:
             inp.send_keys(ch)
+        # Debounce: GXT-combobox дёргает серверный autocomplete по событию
+        # ключевой паузы. Без задержки send_keys возвращается мгновенно,
+        # запрос ещё не ушёл, и мы стартуем поиск кандидатов в пустом DOM.
+        time.sleep(0.3)
         log.info(f"Введена фамилия: {surname}")
 
-        # Кандидаты в выпадашке — ждём появления, не фикс. sleep
+        # Кандидаты в выпадашке. ВАЖНО:
+        # 1) НЕ ищем по `contains(text(),...)` без фильтра — surname может
+        #    встречаться в лейблах/заголовках уже открытой карточки и
+        #    WebDriverWait моментально пройдёт по ложному кандидату.
+        # 2) Фильтр: текст должен быть похож на ФИО (≥2 кириллических
+        #    слова с большой буквы) — это отсекает лейблы вроде
+        #    «Халецкая (на резолюцию)» из шапки.
+        # 3) Таймаут 15с — у АСУД серверный autocomplete иногда 6-10с после
+        #    переключения учётки/холодного старта сессии.
+        # 4) НЕТ Enter-fallback — Enter в открытой выпадашке закрывает её
+        #    и фиксирует пустое значение, после чего любой повторный
+        #    ожидающий поиск «зависает» в принципе (ровно тот баг что
+        #    юзер видит).
+        import re as _re
+        # Слово ФИО: либо полное «Иванова», либо инициал «И.» или «И»
+        _fio_word = _re.compile(r'^[А-ЯЁ](?:[а-яё]+|\.?)$')
+        def _looks_like_fio(text):
+            txt = (text or '').strip()
+            if not txt or len(txt) > 120:
+                return False
+            # Делим по пробелам и точкам (чтобы «Ю.В.» распался на «Ю.» и «В.»)
+            words = [w for w in _re.split(r'\s+|(?<=\.)', txt) if w.strip(' .')]
+            named = sum(1 for w in words if _fio_word.match(w.rstrip('.') + ('.' if w.endswith('.') else '')))
+            return named >= 2
+
         def _candidates():
             results = driver.find_elements(By.XPATH,
                 f"//*[contains(text(),'{surname}')]")
-            return [r for r in results
-                    if r.is_displayed() and r != inp
-                    and r.tag_name.lower() != 'input']
+            out = []
+            for r in results:
+                if r == inp or r.tag_name.lower() == 'input':
+                    continue
+                try:
+                    if not r.is_displayed():
+                        continue
+                    txt = (r.text or '').strip()
+                    if not _looks_like_fio(txt):
+                        continue
+                    out.append(r)
+                except Exception:
+                    continue
+            return out
 
         candidates = []
         try:
-            WebDriverWait(driver, 5).until(lambda d: len(_candidates()) > 0)
+            WebDriverWait(driver, 15).until(lambda d: len(_candidates()) > 0)
             candidates = _candidates()
         except Exception:
-            try:
-                inp.send_keys(Keys.ENTER)
-                WebDriverWait(driver, 3).until(lambda d: len(_candidates()) > 0)
-                candidates = _candidates()
-            except Exception:
-                pass
+            log.error(f"Выпадашка 'Исполнитель' не появилась за 15с после ввода '{surname}'")
+            return False
 
         log.info(f"Кандидатов: {len(candidates)}")
         target = None
