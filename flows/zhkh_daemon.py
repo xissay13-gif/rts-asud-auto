@@ -289,7 +289,7 @@ def main():
         sys.exit(1)
 
     watch_list      = dcfg.get("watch") or []
-    poll_interval   = int(dcfg.get("poll_interval_sec", 30))
+    poll_interval   = int(dcfg.get("poll_interval_sec", 300))
     switch_to       = dcfg.get("switch_to_user", "Басманов")
     sidebar         = dcfg.get("sidebar_section", "На резолюцию")
     executor        = dcfg.get("executor_fio", "Халецкая Юлия Владимировна")

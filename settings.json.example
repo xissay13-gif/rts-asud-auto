@@ -31,7 +31,8 @@
     }
   ],
 
-  "email_watch_interval_sec": 30,
+  "_comment_intervals": "Интервалы в СЕКУНДАХ. email_watch_interval_sec — как часто email-daemon (--watch) опрашивает папку с .msg. По умолчанию 300 (5 минут).",
+  "email_watch_interval_sec": 300,
   "email_max_retries": 3,
 
   "asud_url": "https://asud.interrao.ru/asudik/",
@@ -44,7 +45,7 @@
       {"dir": "D:\\OutlookSubjects\\ТЭС",    "xlsx_pattern": "ТЭС_резолюции.xlsx"},
       {"dir": "D:\\OutlookSubjects\\ОЭК",    "xlsx_pattern": "ОЭК_резолюции.xlsx"}
     ],
-    "poll_interval_sec": 30,
+    "poll_interval_sec": 300,
     "switch_to_user": "Басманов",
     "sidebar_section": "На резолюцию",
     "executor_fio": "Халецкая Юлия Владимировна",

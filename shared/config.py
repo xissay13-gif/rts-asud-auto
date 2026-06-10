@@ -23,8 +23,8 @@ DEFAULTS = {
     "unknown_correspondent": "Неизвестный Неизвестный Неизвестный",
     "delivery_method": "Электронная почта",
     "sheet_name": "Лист2",
-    # email-daemon (--watch)
-    "email_watch_interval_sec": 30,
+    # email-daemon (--watch) — интервал опроса папки с .msg-письмами
+    "email_watch_interval_sec": 300,
     "email_max_retries": 3,
     # Если True — обработанные .msg удаляются вместо переноса в Завершено/.
     # По умолчанию True — в daemon-режиме Завершено/ разрастается до тысяч
