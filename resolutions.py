@@ -2306,6 +2306,15 @@ def main():
             # (сетевая шара примонтировалась, юзер создал реестр в новой папке).
             last_watch_rescan = time.monotonic()
             WATCH_RESCAN_INTERVAL = 300
+            # Round-robin: каждый тик берёт один реестр в порядке xlsx_paths.
+            # Поведение: poll_interval ОЭК → poll_interval ТЭС → ...
+            watch_round_robin = bool(settings.get("watch_round_robin", False))
+            rr_idx = 0
+            if watch_round_robin and len(xlsx_paths) > 1:
+                log.info(f"Watch mode: ROUND-ROBIN ({len(xlsx_paths)} реестров "
+                         f"по очереди, по одному за тик)")
+            elif len(xlsx_paths) > 1:
+                log.info(f"Watch mode: ALL ({len(xlsx_paths)} реестров на каждом тике)")
 
             while not _stop_flag:
                 _interruptible_sleep(args.poll_interval)
@@ -2353,11 +2362,25 @@ def main():
                         xlsx_paths = new_paths
                     last_watch_rescan = time.monotonic()
 
-                # Multi-file: собираем todo со всех реестров, у которых mtime
-                # изменился. Если изменился хоть один — есть смысл крутить дальше.
+                # Mode selection:
+                # 1) round-robin (watch_round_robin=true в config.json) —
+                #    на каждом тике берём ОДИН реестр, следующая итерация —
+                #    следующий. Удобно когда хочется чёткое расписание:
+                #    «5 мин ОЭК → 5 мин ТЭС → 5 мин ГИСЖКХ → ...»
+                # 2) all (по умолчанию) — на каждом тике проверяем ВСЕ реестры,
+                #    обрабатываем todo со всех у которых mtime изменился.
+                if watch_round_robin and xlsx_paths:
+                    cur_xpath = xlsx_paths[rr_idx % len(xlsx_paths)]
+                    rr_idx += 1
+                    log.info(f"[итер. {iters}] round-robin: проверяю "
+                             f"{os.path.basename(cur_xpath)}")
+                    paths_this_tick = [cur_xpath]
+                else:
+                    paths_this_tick = xlsx_paths
+
                 changed_files = 0
                 todo_all = []
-                for xpath in xlsx_paths:
+                for xpath in paths_this_tick:
                     try:
                         cur_mtime = os.path.getmtime(xpath)
                     except OSError:
@@ -2372,8 +2395,12 @@ def main():
                     log.debug(f"[итер. {iters}] изменилось файлов: {changed_files}, todo: 0")
                     continue
 
-                log.info(f"[итер. {iters}] todo: {len(todo_all)} документов "
-                         f"из {changed_files} изменённых реестров")
+                if watch_round_robin:
+                    log.info(f"[итер. {iters}] todo: {len(todo_all)} документов "
+                             f"из {os.path.basename(paths_this_tick[0])}")
+                else:
+                    log.info(f"[итер. {iters}] todo: {len(todo_all)} документов "
+                             f"из {changed_files} изменённых реестров")
                 batch_ok = _process_batch(todo_all)
                 if not batch_ok:
                     log.warning(f"[итер. {iters}] batch прерван driver-crash'ем "
