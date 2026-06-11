@@ -1573,6 +1573,38 @@ def row_has_resolution_to(row_element, executor_fio):
     return False
 
 
+def filtered_grid_has_executor(driver, executor_fio):
+    """После применения filter_by_number — проверяет видна ли фамилия
+    executor'а в ЛЮБОЙ строке отфильтрованного списка.
+
+    В АСУД списке у одного документа обычно две строки: запись (rec)
+    и задание (task). «Направлено: Халецкая Ю.В.» появляется только
+    в task-строке. row_has_resolution_to проверяет одну строку, поэтому
+    может пропустить Халецкую в соседней. Эта функция ищет глобально
+    по всему отфильтрованному гриду.
+    """
+    if not executor_fio:
+        return False
+    surname = executor_fio.split()[0]
+    if not surname:
+        return False
+    try:
+        # nobr с фамилией внутри любой data-row грида
+        nobrs = driver.find_elements(
+            By.XPATH,
+            f"//tr[contains(concat(' ',@class,' '),' obj-list-rec ')]"
+            f"//nobr[contains(text(), '{surname}')]")
+        for n in nobrs:
+            try:
+                if n.is_displayed():
+                    return True
+            except Exception:
+                continue
+    except Exception as e:
+        log.debug(f"filtered_grid_has_executor: {e}")
+    return False
+
+
 def card_has_any_resolution(driver, timeout=3):
     """True если в открытой карточке есть ХОТЬ КАКАЯ-ТО выданная резолюция
     (кому угодно — не обязательно нашему executor'у).
@@ -2548,8 +2580,8 @@ def main():
                     if xpath and mark_status(xpath, asud_id, status_col):
                         log.debug(f"  → xlsx mark «{status_col}» (документ не в очереди)")
                     continue
-                if row_has_resolution_to(row, executor):
-                    log.info(f"  ✓ В «Направлено» есть «{executor.split()[0]}» — синхрон xlsx")
+                if row_has_resolution_to(row, executor) or filtered_grid_has_executor(driver, executor):
+                    log.info(f"  ✓ В «Направлено» (списка) есть «{executor.split()[0]}» — синхрон xlsx")
                     xpath = doc.get('_xlsx_path') or settings.get("_xlsx_path")
                     if xpath and mark_status(xpath, asud_id, status_col):
                         sync_found += 1
@@ -2558,7 +2590,7 @@ def main():
                     # Глубокая проверка: открываем карточку и смотрим есть ли
                     # ВООБЩЕ выданная резолюция (кому угодно — может левому
                     # исполнителю или старая, главное что документ уже в работе).
-                    log.info(f"  в строке нет «{executor.split()[0]}» — открываю карточку для проверки")
+                    log.info(f"  в списке нет «{executor.split()[0]}» — открываю карточку для проверки")
                     if open_doc_card(driver, row):
                         if card_has_any_resolution(driver):
                             log.info(f"  ✓ В карточке есть резолюция (другому исп.) — синхрон xlsx")
