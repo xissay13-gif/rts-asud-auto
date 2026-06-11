@@ -2514,7 +2514,7 @@ def main():
                         log.debug(f"  → xlsx mark «{status_col}»")
                 else:
                     sync_clean += 1
-                    log.debug(f"  резолюции нет (оставляю для обычного daemon)")
+                    log.info(f"  ⚪ резолюции нет — оставляю для обычного daemon")
             log.info("=" * 60)
             log.info(f"SYNC ГОТОВО: проверено {len(docs)}, "
                      f"синхронизировано {sync_found}, "
