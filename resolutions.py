@@ -2192,10 +2192,19 @@ def main():
                         help="Интервал поллинга xlsx в --watch режиме. "
                              "По умолчанию — из config.json (poll_interval_sec), "
                              "либо 300с (5 мин). Флаг переопределяет JSON.")
+    parser.add_argument('--sync-only', action='store_true',
+                        help="Режим сверки: только проверить состояние АСУД "
+                             "vs xlsx для каждой строки (открыть АСУД, для "
+                             "необходимых строк прочитать колонку «Направлено», "
+                             "если фамилия совпадает с force_executor → отметить "
+                             "в xlsx статус). НЕ создаёт резолюций. Полезно "
+                             "после ручных правок в АСУД или при подозрении "
+                             "на расхождение данных.")
     args = parser.parse_args()
 
     # Любой batch-флаг → unattended-режим: не зависаем на input("Enter...")
-    _UNATTENDED = bool(args.headless or args.preset or args.xlsx or args.yes or args.watch)
+    _UNATTENDED = bool(args.headless or args.preset or args.xlsx or args.yes
+                       or args.watch or args.sync_only)
 
     settings = cfg.load()
     cfg.keep_system_awake(True)
@@ -2457,6 +2466,62 @@ def main():
                             return False
                         log.warning(f"Reset тоже не сработал: {e2}")
             return True
+
+        # === SYNC-only: только сверить АСУД с xlsx, не создавать резолюции ====
+        if args.sync_only:
+            log.info("=" * 60)
+            log.info(f"SYNC-режим: проверка {len(docs)} строк vs АСУД "
+                     f"(резолюции НЕ создаются)")
+            log.info("=" * 60)
+            sync_found = 0
+            sync_clean = 0
+            sync_missing = 0
+            for i, doc in enumerate(docs, 1):
+                if _stop_flag:
+                    log.info("Stop-flag — прерываю sync")
+                    break
+                if not _ensure_driver():
+                    log.error("Driver упал в sync, recovery не удался — выход")
+                    break
+                asud_id = doc.get('asud_id')
+                executor = doc.get('executor')
+                if not asud_id or not executor:
+                    continue
+                log.info(f"[sync {i}/{len(docs)}] {asud_id} → ожидаю «{executor.split()[0]}»")
+                try:
+                    row = find_doc_row(driver, doc, timeout=10)
+                except Exception as e:
+                    if _is_driver_crash(e):
+                        log.error(f"  driver crash: {e}")
+                        continue
+                    log.warning(f"  find_doc_row: {e}")
+                    continue
+                if not row:
+                    log.info(f"  {asud_id}: не найден в списке "
+                             f"(возможно ушёл в «Завершённые» — считаем отписанным)")
+                    sync_missing += 1
+                    # Если документа нет в очереди — значит уже завершён,
+                    # помечаем в xlsx чтобы daemon не пытался открыть.
+                    xpath = doc.get('_xlsx_path') or settings.get("_xlsx_path")
+                    if xpath and mark_status(xpath, asud_id, status_col):
+                        log.debug(f"  → xlsx mark «{status_col}» (документ не в очереди)")
+                    continue
+                if row_has_resolution_to(row, executor):
+                    log.info(f"  ✓ В «Направлено» есть «{executor.split()[0]}» — синхрон xlsx")
+                    xpath = doc.get('_xlsx_path') or settings.get("_xlsx_path")
+                    if xpath and mark_status(xpath, asud_id, status_col):
+                        sync_found += 1
+                        log.debug(f"  → xlsx mark «{status_col}»")
+                else:
+                    sync_clean += 1
+                    log.debug(f"  резолюции нет (оставляю для обычного daemon)")
+            log.info("=" * 60)
+            log.info(f"SYNC ГОТОВО: проверено {len(docs)}, "
+                     f"синхронизировано {sync_found}, "
+                     f"чистых (ждут обработки) {sync_clean}, "
+                     f"не в очереди (помечены done) {sync_missing}")
+            log.info("=" * 60)
+            return  # sync — это всегда one-shot, выходим без daemon loop
 
         # Первый проход — по уже загруженному списку docs
         batch_ok = _process_batch(docs)
