@@ -1465,6 +1465,48 @@ def close_card_after_complete(driver):
     close_card_after_resolution(driver)
 
 
+def row_has_resolution_to(row_element, executor_fio):
+    """True если строка в списке («На резолюцию»/«Исполнение») уже имеет
+    в колонке «Направлено» ФИО executor_fio.
+
+    Колонка «Направлено» в гриде АСУД: header id="AF_HH_dss_child_performer".
+    В ячейке строки этой колонки текст рендерится как <nobr>Халецкая Ю.В.</nobr>
+    (см. HTML-дампы из main grid view).
+
+    БЫСТРАЯ проверка — не требует открытия карточки. Если фамилия там есть,
+    значит резолюция уже выдана, можно skip + mark_status + следующая строка.
+
+    Возвращает True если фамилия исполнителя обнаружена в строке.
+    """
+    if row_element is None or not executor_fio:
+        return False
+    surname = executor_fio.split()[0]
+    if not surname:
+        return False
+    try:
+        # nobr с фамилией внутри row → 99% случай (колонка «Направлено»)
+        nobrs = row_element.find_elements(
+            By.XPATH, f".//nobr[contains(text(), '{surname}')]")
+        for n in nobrs:
+            try:
+                if n.is_displayed():
+                    return True
+            except Exception:
+                continue
+        # Fallback — любой элемент с текстом-фамилией в ячейках грида
+        cells = row_element.find_elements(
+            By.XPATH, f".//*[contains(text(), '{surname}')]")
+        for c in cells:
+            try:
+                if c.is_displayed() and c.tag_name.lower() in ('nobr', 'span', 'div'):
+                    return True
+            except Exception:
+                continue
+    except Exception as e:
+        log.debug(f"row_has_resolution_to({executor_fio!r}): {e}")
+    return False
+
+
 def has_existing_resolution_to(driver, executor_fio, timeout=3):
     """True если в открытой карточке уже есть резолюция на executor_fio.
 
@@ -1582,6 +1624,20 @@ def process_one(driver, doc, index, total):
         log.warning(f"Row {doc['row_idx']}: документ в списке не найден → пропускаю")
         return False
     log.debug(f"  Шаг 1 OK ({time.monotonic()-t_start:.1f}s)")
+
+    # 1.5. Быстрая проверка в самой строке: если в колонке «Направлено»
+    # (id заголовка AF_HH_dss_child_performer) уже стоит ФИО исполнителя —
+    # резолюция выдана. Skip + sync xlsx БЕЗ открытия карточки.
+    if row_has_resolution_to(row, doc.get('executor')):
+        surname = doc['executor'].split()[0] if doc.get('executor') else '?'
+        log.info(f"Row {doc['row_idx']}: в строке списка уже видно «{surname}» "
+                 f"в «Направлено» — пропуск + синхрон xlsx (без открытия карточки)")
+        xlsx_path = doc.get('_xlsx_path') or settings.get("_xlsx_path")
+        status_col = settings.get("_status_column")
+        if xlsx_path and status_col and doc.get('asud_id'):
+            if mark_status(xlsx_path, doc['asud_id'], status_col):
+                log.debug(f"  → xlsx: {doc['asud_id']} помечен «{status_col}» (синхрон по списку)")
+        return True
 
     # 2. Открыть карточку
     log.info(f"--- ШАГ 2/12: открыть карточку ---")
