@@ -1573,6 +1573,48 @@ def row_has_resolution_to(row_element, executor_fio):
     return False
 
 
+def card_has_any_resolution(driver, timeout=3):
+    """True если в открытой карточке есть ХОТЬ КАКАЯ-ТО выданная резолюция
+    (кому угодно — не обязательно нашему executor'у).
+
+    Признак — наличие хотя бы одного <td> с div.mainExecutorMark («отв.исп.»)
+    в панели «Этапы исполнения». Дополнительно проверяется ячейка даты
+    выдачи (lfce-stage-grid-column_dsdt_init_date с DD.MM.YYYY).
+
+    Используется в sync-режиме как fallback после row_has_resolution_to:
+    если в Направлено колонке списка нашего executor'а не видно, но в
+    карточке всё-таки есть какая-то резолюция (выданная вручную человеком
+    другому исполнителю, или нашим daemon'ом до восстановления xlsx) —
+    отмечаем done в xlsx, чтобы daemon не плодил дубли.
+    """
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            # Любой td с mainExecutorMark = резолюция выдана
+            cells = driver.find_elements(
+                By.XPATH, "//td[.//div[contains(@class, 'mainExecutorMark')]]")
+            for c in cells:
+                try:
+                    if c.is_displayed():
+                        return True
+                except Exception:
+                    continue
+            # Fallback: ячейка даты в stage_grid
+            dates = driver.find_elements(
+                By.CSS_SELECTOR, "td.lfce-stage-grid-column_dsdt_init_date")
+            for d in dates:
+                try:
+                    txt = (d.text or '').strip()
+                    if txt and re.match(r'\d{2}\.\d{2}\.\d{4}', txt) and d.is_displayed():
+                        return True
+                except Exception:
+                    continue
+        except Exception as e:
+            log.debug(f"card_has_any_resolution: {e}")
+        time.sleep(0.5)
+    return False
+
+
 def has_existing_resolution_to(driver, executor_fio, timeout=3):
     """True если в открытой карточке уже есть резолюция на executor_fio.
 
@@ -2513,8 +2555,24 @@ def main():
                         sync_found += 1
                         log.debug(f"  → xlsx mark «{status_col}»")
                 else:
-                    sync_clean += 1
-                    log.info(f"  ⚪ резолюции нет — оставляю для обычного daemon")
+                    # Глубокая проверка: открываем карточку и смотрим есть ли
+                    # ВООБЩЕ выданная резолюция (кому угодно — может левому
+                    # исполнителю или старая, главное что документ уже в работе).
+                    log.info(f"  в строке нет «{executor.split()[0]}» — открываю карточку для проверки")
+                    if open_doc_card(driver, row):
+                        if card_has_any_resolution(driver):
+                            log.info(f"  ✓ В карточке есть резолюция (другому исп.) — синхрон xlsx")
+                            xpath = doc.get('_xlsx_path') or settings.get("_xlsx_path")
+                            if xpath and mark_status(xpath, asud_id, status_col):
+                                sync_found += 1
+                                log.debug(f"  → xlsx mark «{status_col}» (any resolution)")
+                        else:
+                            sync_clean += 1
+                            log.info(f"  ⚪ в карточке тоже нет резолюции — оставляю для daemon")
+                        close_card_after_resolution(driver)
+                    else:
+                        log.warning(f"  ⚠ не открылась карточка — пропускаю как clean")
+                        sync_clean += 1
             log.info("=" * 60)
             log.info(f"SYNC ГОТОВО: проверено {len(docs)}, "
                      f"синхронизировано {sync_found}, "
