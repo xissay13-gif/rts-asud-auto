@@ -1426,21 +1426,62 @@ def submit_resolution(driver):
     return True
 
 
-def click_complete_button(driver, timeout=10):
+def click_complete_button(driver, timeout=20):
     """Клик по кнопке «Завершить» в открытой карточке.
 
     Стабильный id — `header-action-btn-finish_task` (по HTML-дампу).
     Без неё документ остаётся «в работе» у Халецкой/Басманова даже после
     выдачи резолюции — формально для них задача не закрыта. С «Завершить»
     карточка уходит в «Завершённые» и больше не отвлекает.
+
+    Двухфазная проверка для диагностики:
+    1) Сначала ищем presence (просто наличие в DOM)
+    2) Потом ждём clickable (visible + enabled)
+    Если нашли но не кликабельна — лог объясняет почему.
+
+    Timeout увеличен до 20с: после submit_resolution иногда висит модалка
+    «Резолюция создана» или АСУД пересчитывает stage_grid, кнопка появляется
+    через 5-10с после сабмита.
     """
-    log.info("Ищу кнопку 'Завершить'")
-    try:
-        btn = WebDriverWait(driver, timeout).until(
-            EC.element_to_be_clickable((By.ID, "header-action-btn-finish_task")))
-    except Exception:
-        log.warning("Кнопка 'Завершить' (#header-action-btn-finish_task) не появилась "
-                    "за {timeout}с — возможно документ уже завершён")
+    log.info(f"Ищу кнопку 'Завершить' (id=header-action-btn-finish_task, timeout={timeout}с)")
+    end = time.monotonic() + timeout
+    btn = None
+    # Фаза 1: ждём появления в DOM
+    while time.monotonic() < end:
+        try:
+            btn = driver.find_element(By.ID, "header-action-btn-finish_task")
+            break
+        except Exception:
+            time.sleep(0.5)
+    if btn is None:
+        log.warning(f"Кнопка 'Завершить' (#header-action-btn-finish_task) не появилась "
+                    f"за {timeout}с — возможно документ уже завершён или другое состояние")
+        return False
+    # Фаза 2: ждём пока станет кликабельной (visible + enabled)
+    log.debug("Завершить: найдена в DOM, жду пока станет кликабельной")
+    clickable = False
+    while time.monotonic() < end:
+        try:
+            displayed = btn.is_displayed()
+            enabled = btn.is_enabled()
+            data_disabled = btn.get_attribute("data-disabled") or "0"
+            if displayed and enabled and data_disabled != "1":
+                clickable = True
+                break
+            log.debug(f"  Завершить: displayed={displayed}, enabled={enabled}, "
+                      f"data-disabled={data_disabled}")
+        except Exception as e:
+            log.debug(f"  Завершить: ошибка проверки состояния: {e}")
+            break
+        time.sleep(0.5)
+    if not clickable:
+        # Прицельный диагноз — что мешает клику
+        try:
+            log.warning(f"Кнопка 'Завершить' есть в DOM, но не кликабельна: "
+                        f"displayed={btn.is_displayed()}, enabled={btn.is_enabled()}, "
+                        f"data-disabled={btn.get_attribute('data-disabled')!r}")
+        except Exception:
+            log.warning("Кнопка 'Завершить' есть в DOM, но недоступна (stale element)")
         return False
     click(driver, btn, "Завершить")
     log.info("Кнопка 'Завершить' нажата")
