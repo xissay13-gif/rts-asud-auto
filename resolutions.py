@@ -1492,17 +1492,22 @@ def close_card_after_complete(driver):
     """После клика по 'Завершить' карточка должна закрыться сама.
     Safety net: если осталась открыта — кликаем header-close-btn.
     """
-    # Сначала ждём что главная вернулась сама
+    # Сначала ждём что главная вернулась сама. Timeout увеличен до 12с —
+    # АСУД после «Завершить» иногда пересчитывает stage_grid 7-10 секунд
+    # прежде чем закрыть карточку. По логу resolutions_20260611_080147_1
+    # из 26 успешных «Завершить» только 9 закрывались за 5с, остальные
+    # 25 валились в fallback. Большинство из этих 25 — просто долго.
     try:
-        WebDriverWait(driver, 5).until(
+        WebDriverWait(driver, 12).until(
             EC.element_to_be_clickable((By.ID, "mainscreen-create-button")))
         log.info("[close] карточка закрылась сама после «Завершить»")
         return
     except Exception:
         pass
 
-    # Резерв — клик по крестику (используем существующую функцию)
-    log.info("[close] карточка ещё открыта после «Завершить», fallback на header-close-btn")
+    # Резерв — клик по крестику. Срабатывает в реально редких случаях
+    # когда АСУД завис или Завершить попал в edge-state.
+    log.info("[close] карточка ещё открыта после «Завершить» (>12с), fallback на header-close-btn")
     close_card_after_resolution(driver)
 
 
