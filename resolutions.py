@@ -1573,38 +1573,6 @@ def row_has_resolution_to(row_element, executor_fio):
     return False
 
 
-def filtered_grid_has_executor(driver, executor_fio):
-    """После применения filter_by_number — проверяет видна ли фамилия
-    executor'а в ЛЮБОЙ строке отфильтрованного списка.
-
-    В АСУД списке у одного документа обычно две строки: запись (rec)
-    и задание (task). «Направлено: Халецкая Ю.В.» появляется только
-    в task-строке. row_has_resolution_to проверяет одну строку, поэтому
-    может пропустить Халецкую в соседней. Эта функция ищет глобально
-    по всему отфильтрованному гриду.
-    """
-    if not executor_fio:
-        return False
-    surname = executor_fio.split()[0]
-    if not surname:
-        return False
-    try:
-        # nobr с фамилией внутри любой data-row грида
-        nobrs = driver.find_elements(
-            By.XPATH,
-            f"//tr[contains(concat(' ',@class,' '),' obj-list-rec ')]"
-            f"//nobr[contains(text(), '{surname}')]")
-        for n in nobrs:
-            try:
-                if n.is_displayed():
-                    return True
-            except Exception:
-                continue
-    except Exception as e:
-        log.debug(f"filtered_grid_has_executor: {e}")
-    return False
-
-
 def card_has_any_resolution(driver, timeout=3):
     """True если в открытой карточке есть ХОТЬ КАКАЯ-ТО выданная резолюция
     (кому угодно — не обязательно нашему executor'у).
