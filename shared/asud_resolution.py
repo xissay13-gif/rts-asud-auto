@@ -1097,57 +1097,78 @@ def submit_resolution(driver):
 # Кнопка «Завершить»
 # ============================================================
 
-def click_complete_button(driver, timeout=20):
+def click_complete_button(driver, timeout=20, max_attempts=3):
     """Клик по кнопке «Завершить» в открытой карточке.
 
-    Стабильный id — `header-action-btn-finish_task`. Двухфазная проверка:
-    сначала ждём presence в DOM, потом — clickable (visible+enabled+
-    не data-disabled). Если найдена но не кликабельна — лог явно
-    показывает что мешает (debug каждые 0.5с + warning при провале).
+    HTML-структура (из дампа):
+        <div id="header-action-btn-finish_task">                    ← outer
+          <div class="...Css3ButtonStyle-button" tabindex="0">      ← INNER (кликабельный)
+            <div class="Css3ButtonStyle-buttonInner">Завершить</div>
+          </div>
+        </div>
 
-    Timeout 20с: после submit_resolution иногда висит модалка / АСУД
-    пересчитывает stage_grid, кнопка появляется через 5-10с после сабмита.
+    GXT привязывает click-handler к INNER div'у с tabindex. Если АСУД ещё
+    пересчитывает stage_grid после submit_resolution — handler ещё не
+    привязан. Без drill-down + верификации в логе пишется «нажата» но
+    клик пустой, карточка не закрывается.
+
+    Стратегия: find outer → settle → drill INNER → click → wait 2с →
+    verify outer ушёл из DOM → retry до max_attempts при необходимости.
     """
-    log.info(f"Ищу кнопку 'Завершить' (id=header-action-btn-finish_task, timeout={timeout}с)")
+    log.info(f"Ищу кнопку 'Завершить' (timeout={timeout}с, до {max_attempts} попыток)")
     end = time.monotonic() + timeout
-    btn = None
+    outer = None
     while time.monotonic() < end:
         try:
-            btn = driver.find_element(By.ID, "header-action-btn-finish_task")
+            outer = driver.find_element(By.ID, "header-action-btn-finish_task")
             break
         except Exception:
             time.sleep(0.5)
-    if btn is None:
-        log.warning(f"Кнопка 'Завершить' не появилась за {timeout}с "
-                    f"— возможно документ уже завершён")
+    if outer is None:
+        log.warning(f"Кнопка 'Завершить' не появилась за {timeout}с — "
+                    f"возможно документ уже завершён")
         return False
-    log.debug("Завершить: найдена в DOM, жду пока станет кликабельной")
-    clickable = False
-    while time.monotonic() < end:
+
+    settle_end = min(time.monotonic() + 8, end)
+    while time.monotonic() < settle_end:
         try:
-            displayed = btn.is_displayed()
-            enabled = btn.is_enabled()
-            data_disabled = btn.get_attribute("data-disabled") or "0"
-            if displayed and enabled and data_disabled != "1":
-                clickable = True
+            if outer.is_displayed() and outer.get_attribute("data-disabled") != "1":
                 break
-            log.debug(f"  Завершить: displayed={displayed}, enabled={enabled}, "
-                      f"data-disabled={data_disabled}")
-        except Exception as e:
-            log.debug(f"  Завершить: ошибка проверки: {e}")
-            break
-        time.sleep(0.5)
-    if not clickable:
-        try:
-            log.warning(f"Кнопка 'Завершить' есть в DOM, но не кликабельна: "
-                        f"displayed={btn.is_displayed()}, enabled={btn.is_enabled()}, "
-                        f"data-disabled={btn.get_attribute('data-disabled')!r}")
         except Exception:
-            log.warning("Кнопка 'Завершить' есть в DOM, но недоступна (stale)")
-        return False
-    click(driver, btn, "Завершить")
-    log.info("Кнопка 'Завершить' нажата")
-    return True
+            break
+        time.sleep(0.3)
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            inner = outer.find_element(By.CSS_SELECTOR, "div[tabindex]")
+        except Exception:
+            inner = outer
+        log.debug(f"Завершить: попытка {attempt}/{max_attempts}, "
+                  f"target={'inner' if inner is not outer else 'outer'}")
+        try:
+            click(driver, inner, f"Завершить (попытка {attempt})")
+        except Exception as e:
+            log.warning(f"Завершить click err: {e}")
+        time.sleep(2)
+        try:
+            still = driver.find_element(By.ID, "header-action-btn-finish_task")
+            visible = still.is_displayed()
+        except Exception:
+            visible = False
+        if not visible:
+            log.info(f"Завершить успешно нажата (после {attempt} попыток, кнопка ушла)")
+            return True
+        log.warning(f"Завершить: кнопка ВСЁ ЕЩЁ видна {attempt}/{max_attempts} — "
+                    f"АСУД ещё догружает? повторяю")
+        try:
+            outer = driver.find_element(By.ID, "header-action-btn-finish_task")
+        except Exception:
+            log.info("Завершить: outer исчез между попытками — считаем что нажалось")
+            return True
+        time.sleep(1.5)
+
+    log.error(f"Завершить не сработал за {max_attempts} попыток")
+    return False
 
 
 def close_card_after_complete(driver):
