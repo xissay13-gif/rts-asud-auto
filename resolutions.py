@@ -1465,36 +1465,50 @@ def close_card_after_complete(driver):
     close_card_after_resolution(driver)
 
 
-def has_existing_resolution_to(driver, executor_fio):
+def has_existing_resolution_to(driver, executor_fio, timeout=3):
     """True если в открытой карточке уже есть резолюция на executor_fio.
 
-    Детект по HTML-дампу АСУД: в панели «Этапы исполнения» каждая выданная
+    По HTML-дампу АСУД: в панели «Этапы исполнения» каждая выданная
     резолюция отрисовывается как <td>, содержащий и фамилию исполнителя,
     и <div class="mainExecutorMark">отв.исп.</div>.
 
-    Используется как защита от дублирования: если P3-daemon потерял
-    отметку «Отписано Халецкой» (mark_status упал, юзер открыл xlsx
-    в Excel и т.п.) — на следующей итерации он откроет карточку
-    и обнаружит что резолюция уже есть → пропустит без создания дубля.
+    Поллинг до timeout секунд: панель резолюций иногда подгружается
+    асинхронно после остального содержимого карточки (~1-2с после
+    open_doc_card). Без поллинга мы проверяли ДО рендера и получали
+    ложный False — см. resolutions_20260611_080147.log (ШАГ 2 OK 10.2с,
+    XPath сразу пустой, и Шаг 3 уже жмёт «Создать резолюцию»).
+
+    Используется как защита от дублирования: если daemon потерял отметку
+    «Отписано Халецкой» (mark_status упал, юзер открыл xlsx в Excel) —
+    на следующей итерации обнаружит резолюцию в АСУД → пропустит без
+    создания дубля + синхронизирует xlsx.
     """
     if not executor_fio:
         return False
     surname = executor_fio.split()[0] if executor_fio else ''
     if not surname:
         return False
-    try:
-        # td содержащий И фамилию (текст) И mainExecutorMark (дочерний div)
-        xpath = (f"//td[contains(., '{surname}') and "
-                 f".//div[contains(@class, 'mainExecutorMark')]]")
-        cells = driver.find_elements(By.XPATH, xpath)
-        for c in cells:
-            try:
-                if c.is_displayed():
-                    return True
-            except Exception:
-                continue
-    except Exception as e:
-        log.debug(f"has_existing_resolution_to({executor_fio!r}): {e}")
+    xpath = (f"//td[contains(., '{surname}') and "
+             f".//div[contains(@class, 'mainExecutorMark')]]")
+    end = time.monotonic() + timeout
+    attempts = 0
+    while time.monotonic() < end:
+        attempts += 1
+        try:
+            cells = driver.find_elements(By.XPATH, xpath)
+            for c in cells:
+                try:
+                    if c.is_displayed():
+                        log.info(f"  ✓ В карточке найдена резолюция на «{surname}» "
+                                 f"(после {attempts} проверок) — пропуск дубля")
+                        return True
+                except Exception:
+                    continue
+        except Exception as e:
+            log.debug(f"has_existing_resolution_to({executor_fio!r}): {e}")
+        time.sleep(0.5)
+    log.info(f"  Резолюции на «{surname}» в карточке нет "
+             f"(проверял {timeout}с, {attempts} попыток) — продолжаю создание")
     return False
 
 
