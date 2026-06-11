@@ -566,6 +566,44 @@ def open_doc_card(driver, row):
 # Выдача резолюции — порт из clean-resolutions
 # ============================================================
 
+def row_has_resolution_to(row_element, executor_fio):
+    """True если строка в списке («На резолюцию»/«Исполнение») уже имеет
+    в колонке «Направлено» ФИО executor_fio.
+
+    Колонка «Направлено» в гриде АСУД: header id="AF_HH_dss_child_performer".
+    В ячейке строки этой колонки текст рендерится как <nobr>Халецкая Ю.В.</nobr>.
+
+    БЫСТРАЯ проверка — не требует открытия карточки. Экономит ~8-10с
+    на каждом уже отписанном документе.
+    """
+    if row_element is None or not executor_fio:
+        return False
+    surname = executor_fio.split()[0]
+    if not surname:
+        return False
+    try:
+        nobrs = row_element.find_elements(
+            By.XPATH, f".//nobr[contains(text(), '{surname}')]")
+        for n in nobrs:
+            try:
+                if n.is_displayed():
+                    return True
+            except Exception:
+                continue
+        # Fallback — любой видимый span/div с фамилией
+        cells = row_element.find_elements(
+            By.XPATH, f".//*[contains(text(), '{surname}')]")
+        for c in cells:
+            try:
+                if c.is_displayed() and c.tag_name.lower() in ('nobr', 'span', 'div'):
+                    return True
+            except Exception:
+                continue
+    except Exception as e:
+        log.debug(f"row_has_resolution_to({executor_fio!r}): {e}")
+    return False
+
+
 def has_existing_resolution_to(driver, executor_fio, timeout=3):
     """True если в открытой карточке уже есть резолюция на executor_fio.
 
