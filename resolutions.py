@@ -2580,31 +2580,24 @@ def main():
                     if xpath and mark_status(xpath, asud_id, status_col):
                         log.debug(f"  → xlsx mark «{status_col}» (документ не в очереди)")
                     continue
-                if row_has_resolution_to(row, executor) or filtered_grid_has_executor(driver, executor):
-                    log.info(f"  ✓ В «Направлено» (списка) есть «{executor.split()[0]}» — синхрон xlsx")
+                # ВСЕГДА открываем карточку — это надёжнее чем смотреть в список
+                # (где «Направлено» может быть в соседней task-строке, или вообще
+                # отсутствовать в текущем view). В карточке точный источник истины:
+                # панель «Этапы исполнения» + контр. срок.
+                if not open_doc_card(driver, row):
+                    log.warning(f"  ⚠ не открылась карточка — пропускаю как clean")
+                    sync_clean += 1
+                    continue
+                if card_has_any_resolution(driver):
+                    log.info(f"  ✓ В карточке есть выданная резолюция — синхрон xlsx")
                     xpath = doc.get('_xlsx_path') or settings.get("_xlsx_path")
                     if xpath and mark_status(xpath, asud_id, status_col):
                         sync_found += 1
                         log.debug(f"  → xlsx mark «{status_col}»")
                 else:
-                    # Глубокая проверка: открываем карточку и смотрим есть ли
-                    # ВООБЩЕ выданная резолюция (кому угодно — может левому
-                    # исполнителю или старая, главное что документ уже в работе).
-                    log.info(f"  в списке нет «{executor.split()[0]}» — открываю карточку для проверки")
-                    if open_doc_card(driver, row):
-                        if card_has_any_resolution(driver):
-                            log.info(f"  ✓ В карточке есть резолюция (другому исп.) — синхрон xlsx")
-                            xpath = doc.get('_xlsx_path') or settings.get("_xlsx_path")
-                            if xpath and mark_status(xpath, asud_id, status_col):
-                                sync_found += 1
-                                log.debug(f"  → xlsx mark «{status_col}» (any resolution)")
-                        else:
-                            sync_clean += 1
-                            log.info(f"  ⚪ в карточке тоже нет резолюции — оставляю для daemon")
-                        close_card_after_resolution(driver)
-                    else:
-                        log.warning(f"  ⚠ не открылась карточка — пропускаю как clean")
-                        sync_clean += 1
+                    sync_clean += 1
+                    log.info(f"  ⚪ в карточке нет резолюции — оставляю для daemon")
+                close_card_after_resolution(driver)
             log.info("=" * 60)
             log.info(f"SYNC ГОТОВО: проверено {len(docs)}, "
                      f"синхронизировано {sync_found}, "
