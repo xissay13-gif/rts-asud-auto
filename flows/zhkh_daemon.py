@@ -34,6 +34,7 @@ from shared.xlsx_status import get_done_asud_ids, mark_status, COL_HALETSKAYA
 from shared.asud_resolution import (
     switch_account, click_sidebar_section, find_doc_row, open_doc_card,
     click_create_resolution, has_existing_resolution_to, row_has_resolution_to,
+    filtered_grid_has_executor,
     select_content_template, toggle_switch,
     set_stage_date_explicit, compute_control_date,
     fill_executor, click_add_btn, submit_resolution,
@@ -201,7 +202,7 @@ def _process_one(driver, doc, executor_fio, content_template,
 
     # БЫСТРАЯ проверка в строке списка (колонка «Направлено») — БЕЗ открытия
     # карточки. Если фамилия уже видна там — резолюция выдана, пропуск.
-    if row_has_resolution_to(row, executor_fio):
+    if row_has_resolution_to(row, executor_fio) or filtered_grid_has_executor(driver, executor_fio):
         surname = executor_fio.split()[0] if executor_fio else '?'
         log.info(f"  {asud_id}: в «Направлено» уже видно «{surname}» — "
                  f"пропуск + синхрон xlsx (без открытия карточки)")

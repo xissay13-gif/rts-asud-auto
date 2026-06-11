@@ -604,6 +604,36 @@ def row_has_resolution_to(row_element, executor_fio):
     return False
 
 
+def filtered_grid_has_executor(driver, executor_fio):
+    """После применения filter_by_number — есть ли фамилия executor'а в
+    ЛЮБОЙ строке отфильтрованного списка.
+
+    В АСУД списке у одного документа обычно две строки: запись (rec)
+    и задание (task). «Направлено: Халецкая Ю.В.» появляется только в
+    task-строке. row_has_resolution_to проверяет одну строку и может
+    пропустить Халецкую в соседней. Эта функция ищет глобально.
+    """
+    if not executor_fio:
+        return False
+    surname = executor_fio.split()[0]
+    if not surname:
+        return False
+    try:
+        nobrs = driver.find_elements(
+            By.XPATH,
+            f"//tr[contains(concat(' ',@class,' '),' obj-list-rec ')]"
+            f"//nobr[contains(text(), '{surname}')]")
+        for n in nobrs:
+            try:
+                if n.is_displayed():
+                    return True
+            except Exception:
+                continue
+    except Exception as e:
+        log.debug(f"filtered_grid_has_executor: {e}")
+    return False
+
+
 def has_existing_resolution_to(driver, executor_fio, timeout=3):
     """True если в открытой карточке уже есть резолюция на executor_fio.
 
