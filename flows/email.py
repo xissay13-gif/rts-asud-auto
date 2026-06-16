@@ -403,7 +403,13 @@ def _parse_one_msg(msg_path, process_mode="mix"):
 
     # Для ZHKH и feedback-писем краткое содержание в АСУД = тема (subject),
     # а не полный body (там длинный шаблонный текст с подписью).
-    if zhkh or feedback:
+    # Для feedback дополнительно приклеиваем адрес из тела письма —
+    # юзеру удобнее видеть «Тема + адрес» одной строкой в карточке АСУД,
+    # без необходимости открывать вложение.
+    if feedback:
+        addr = (feedback.get('адрес') or '').strip()
+        soderzhanie = f"{clean_subject} — {addr}" if addr else clean_subject
+    elif zhkh:
         soderzhanie = clean_subject
     else:
         soderzhanie = body_clean
