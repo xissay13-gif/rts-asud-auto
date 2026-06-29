@@ -138,7 +138,11 @@ def parse_zhkh_body(body):
     if not body:
         return None
 
-    # Формат 1/2 — маркер «Информация о заявителе», ФИО раздельно
+    # Формат 1/2 — маркер «Информация о заявителе», ФИО раздельно.
+    # NB: при неудаче НЕ возвращаем None сразу, а проваливаемся в формат 3/4.
+    # Иначе письмо 4-го формата, где в ТЕКСТЕ жалобы случайно встретилась
+    # фраза «Информация о заявителе», ушло бы сюда, не нашло «Фамилия» и
+    # потерялось бы (return None → общий extractor → мусор).
     if _ZHKH_MARKER in body:
         surname = _find_field(body, 'Фамилия')
         name = _find_field(body, 'Имя')
@@ -159,8 +163,8 @@ def parse_zhkh_body(body):
                 'email':           _find_field(body, 'E-mail'),
             }
         log.debug(f"ZHKH (формат 1/2): не хватает ФИО-частей "
-                  f"({surname=!r} {name=!r} {patronymic=!r})")
-        return None
+                  f"({surname=!r} {name=!r} {patronymic=!r}) — пробую формат 3/4")
+        # провал в формат 3/4 ниже (не return None)
 
     # Форматы 3/4 — колон-табличные
     if any(m in body for m in _NEW_MARKERS):
