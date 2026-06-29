@@ -35,7 +35,6 @@ jobs:
         --hidden-import=selenium.webdriver.support.expected_conditions
         --hidden-import=openpyxl
         --hidden-import=extract_msg
-        --hidden-import=olefile
         --hidden-import=colorama
         --hidden-import=shared.config
         --hidden-import=shared.ui

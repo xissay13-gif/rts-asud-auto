@@ -171,63 +171,11 @@ def _msg_link(msg, file_path):
     Формат — как в mix-flow реестре: 'DD.MM.YYYY HH-MM-SS'.
     """
     try:
-        if msg is not None and msg.date:
+        if msg.date:
             return msg.date.strftime("%d.%m.%Y %H-%M-%S")
     except Exception:
         pass
     return os.path.splitext(os.path.basename(file_path))[0]
-
-
-def _raw_msg_text(msg_path, prop_id):
-    """Читает строковый стрим .msg НАПРЯМУЮ через olefile, минуя codepage-
-    логику extract_msg.
-
-    Зачем: у некоторых писем в свойствах врёт кодировка (напр. заявлена
-    gb2312/китайская, а тело — кириллица cp1251). extract_msg доверяет тегу
-    и падает с UnicodeDecodeError на первом кириллическом байте, теряя всё
-    письмо. Мы читаем стрим сами: сначала UTF-16 (суффикс 001F — он всегда
-    корректный, если есть), потом cp1251 (001E).
-
-    prop_id — '0037' (тема) / '1000' (тело). Возвращает строку или ''.
-    """
-    try:
-        import olefile
-    except Exception:
-        return ''
-    try:
-        ole = olefile.OleFileIO(msg_path)
-    except Exception:
-        return ''
-    try:
-        for suffix, codec in (('001F', 'utf-16-le'), ('001E', 'cp1251')):
-            stream = f'__substg1.0_{prop_id}{suffix}'
-            try:
-                if ole.exists(stream):
-                    raw = ole.openstream(stream).read()
-                    return raw.decode(codec, errors='replace')
-            except Exception:
-                continue
-        return ''
-    finally:
-        try:
-            ole.close()
-        except Exception:
-            pass
-
-
-def _safe_field(msg, attr, msg_path, prop_id):
-    """Достаёт msg.subject / msg.body, при ошибке декодирования (кривой
-    codepage) — fallback на прямое чтение OLE-стрима через _raw_msg_text."""
-    try:
-        val = getattr(msg, attr) if msg is not None else None
-        if val:
-            return val
-    except Exception as e:
-        log.info(f"{os.path.basename(msg_path)}: extract_msg не смог "
-                 f"декодировать «{attr}» ({e}) — читаю стрим напрямую")
-        return _raw_msg_text(msg_path, prop_id)
-    # val пустой/None — на всякий случай тоже пробуем сырьё
-    return _raw_msg_text(msg_path, prop_id) if msg is None else (val or "")
 
 
 # ================= PER-DATE XLSX REGISTRY =================
@@ -377,23 +325,18 @@ def _parse_one_msg(msg_path, process_mode="mix"):
     unknown = settings.get("unknown_correspondent",
                             cfg.DEFAULTS["unknown_correspondent"])
 
-    msg = None
     try:
         msg = extract_msg.openMsg(msg_path)
-    except Exception as e:
-        # extract_msg вообще не открыл файл — попробуем сырое чтение стримов
-        log.warning(f"{os.path.basename(msg_path)}: extract_msg.openMsg упал "
-                    f"({e}) — fallback на прямое чтение OLE")
-    # Тему и тело достаём защищённо: при кривом codepage extract_msg кидает
-    # UnicodeDecodeError на .subject/.body — тогда читаем стрим напрямую.
-    subject = _fix_mojibake(_safe_field(msg, 'subject', msg_path, '0037'))
-    body = _fix_mojibake(_safe_field(msg, 'body', msg_path, '1000'))
-    link = _msg_link(msg, msg_path)
-    if msg is not None:
+        subject = _fix_mojibake(msg.subject or "")
+        body = _fix_mojibake(msg.body or "")
+        link = _msg_link(msg, msg_path)
         try:
             msg.close()
         except Exception:
             pass
+    except Exception as e:
+        log.warning(f"Не удалось прочитать {os.path.basename(msg_path)}: {e}")
+        return None
 
     if not body and not subject:
         log.warning(f"Пустое письмо {os.path.basename(msg_path)} — пропускаю")
