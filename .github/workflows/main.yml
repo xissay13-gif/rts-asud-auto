@@ -2,7 +2,7 @@ name: Build Resolutions EXE
 
 on:
   push:
-    branches: [ clean-resolutions ]
+    branches: [ resolutions ]
   workflow_dispatch:
 
 jobs:
