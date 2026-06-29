@@ -40,6 +40,7 @@ jobs:
         --hidden-import=config
         --hidden-import=ui
         --hidden-import=correspondent
+        --hidden-import=deadline
         --collect-submodules=openpyxl
         resolutions.py
 

@@ -43,6 +43,7 @@ from ui import (click, wait_and_click, find_input_near_label,
 from correspondent import match_correspondent
 from xlsx_status import mark_status, get_done_asud_ids, COL_HALETSKAYA, COL_OKRUG
 from xlsx_lock import is_xlsx_busy
+from deadline import parse_ddmmyyyy, add_working_days, compute_deadline
 
 _log_console = logging.StreamHandler()
 _log_console.setLevel(logging.INFO)
@@ -327,6 +328,7 @@ def load_excel(file_path):
     okrug_keys = ('округ', 'ао')
     link_keys = ('link', 'ссылк')
     planned_keys = ('планиру',)
+    receipt_keys = ('дата получ', 'получено', 'получения')
 
     def _col(predicate_keys):
         for i, h in enumerate(header_lower):
@@ -342,9 +344,18 @@ def load_excel(file_path):
         okrug_col = _col(okrug_keys)
         link_col = _col(link_keys)
         planned_col = _col(planned_keys)
+        receipt_col = _col(receipt_keys)
         log.info(f"Формат _резолюции: ОПТС=col{asud_col}, "
                  f"ФИО=col{fio_col}, Округ=col{okrug_col}, "
-                 f"Link=col{link_col}, ПланДата=col{planned_col}")
+                 f"Link=col{link_col}, ПланДата=col{planned_col}, "
+                 f"ДатаПолуч=col{receipt_col}")
+
+        def _cell_date(row, col):
+            """Значение ячейки-даты → DD.MM.YYYY (datetime→strftime, иначе str)."""
+            if col is None or col >= len(row) or not row[col]:
+                return ''
+            pv = row[col]
+            return pv.strftime("%d.%m.%Y") if hasattr(pv, 'strftime') else str(pv).strip()
 
         rows = []
         for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
@@ -354,14 +365,8 @@ def load_excel(file_path):
             fio = str(row[fio_col]).strip() if (fio_col is not None and row[fio_col]) else ''
             ao = str(row[okrug_col]).strip() if (okrug_col is not None and row[okrug_col]) else ''
             link = row[link_col] if (link_col is not None) else None
-            planned = ''
-            if planned_col is not None and planned_col < len(row) and row[planned_col]:
-                pv = row[planned_col]
-                # openpyxl может вернуть datetime/date — приводим к DD.MM.YYYY
-                if hasattr(pv, 'strftime'):
-                    planned = pv.strftime("%d.%m.%Y")
-                else:
-                    planned = str(pv).strip()
+            planned = _cell_date(row, planned_col)
+            receipt = _cell_date(row, receipt_col)
 
             # Если ФИО пуст, но Округ есть — пытаемся через мапу
             if not fio and ao:
@@ -381,6 +386,7 @@ def load_excel(file_path):
                 "appeal_no": None,
                 "ls": "",
                 "planned_date": planned,
+                "receipt_date": receipt,
             })
         wb.close()
         log.info(f"Загружено: {len(rows)} строк (формат _резолюции)")
@@ -425,6 +431,7 @@ def load_excel(file_path):
             "executor": executor,
             "appeal_no": appeal_no,
             "planned_date": "",
+            "receipt_date": "",
         })
     wb.close()
     log.info(f"Загружено: {len(rows)} (старый формат), пропущено: {skipped}")
@@ -1125,26 +1132,42 @@ def add_business_days(start, days):
     return cur
 
 
-def compute_control_date(planned_date_str, n_workdays):
+def compute_control_date(planned_date_str, n_workdays, receipt_date_str=None):
     """Возвращает строку DD.MM.YYYY для поля «Контрольный этап».
 
-    Приоритет:
-      1) planned_date_str (из xlsx-колонки «Планируемая дата») — если
-         распарсилось и она в будущем, используем ЕЁ. Это срок ГИС ЖКХ,
-         именно к нему должна быть привязана резолюция.
-      2) Fallback: settings.stage_date_mode/days (today + N).
+    Приоритет (C+D):
+      1) planned_date_str (xlsx «Планируемая дата» = срок, вычисленный P1
+         как min(получ+17раб, срок ГИС)). Если распарсилось:
+            • дата в будущем → используем ЕЁ
+            • дата сегодня/в прошлом (ПРОСРОЧКА, фикс C) → НЕ затираем на
+              комфортный today+N, ставим ближайший рабочий день (today+1раб)
+              + WARNING. Резолюция получает сигнал срочности, не теряем срок.
+      2) Если «Планируемая дата» пуста — пересчитываем из receipt_date_str
+         (xlsx «Дата получения») той же формулой compute_deadline (фикс D).
+      3) Совсем нет данных → старый fallback settings.stage_date_mode/days
+         (today + N) от даты запуска.
     """
     today = date.today()
-    if planned_date_str:
-        try:
-            parts = str(planned_date_str).strip().split('.')
-            if len(parts) == 3:
-                d = date(int(parts[2]), int(parts[1]), int(parts[0]))
-                if d > today:
-                    return d.strftime("%d.%m.%Y")
-        except Exception:
-            pass
-    # Fallback: today + N
+
+    # 1) Готовая планируемая дата из реестра
+    d = parse_ddmmyyyy(planned_date_str)
+    # 2) Пусто → пересчитать из даты получения (D)
+    if not d and receipt_date_str:
+        recomputed = compute_deadline(receipt_date_str, None, n_workdays)
+        d = parse_ddmmyyyy(recomputed)
+        if d:
+            log.info(f"Срок пересчитан из даты получения {receipt_date_str}: {recomputed}")
+
+    if d:
+        if d > today:
+            return d.strftime("%d.%m.%Y")
+        # Просрочка / сегодня (C): минимальный будущий срок, не today+N
+        nxt = add_working_days(today, 1)
+        log.warning(f"Срок {d.strftime('%d.%m.%Y')} просрочен/сегодня — "
+                    f"ставлю ближайший рабочий день {nxt.strftime('%d.%m.%Y')}")
+        return nxt.strftime("%d.%m.%Y")
+
+    # 3) Нет ни планируемой, ни даты получения → старый fallback today+N
     mode = settings.get("stage_date_mode", cfg.DEFAULTS["stage_date_mode"])
     n_days = settings.get("stage_date_days") or n_workdays
     if mode == "calendar":
@@ -1152,16 +1175,17 @@ def compute_control_date(planned_date_str, n_workdays):
     return add_business_days(today, n_days).strftime("%d.%m.%Y")
 
 
-def set_stage_date(driver, n_workdays, planned_date=None):
+def set_stage_date(driver, n_workdays, planned_date=None, receipt_date=None):
     """Заполняет дату в поле 'Контрольный этап'.
 
-    planned_date (DD.MM.YYYY) — приоритетный источник: если задан и в будущем,
-    используется он. Иначе считаем today + n_workdays (или today + N
-    календарных, если settings.stage_date_mode == 'calendar').
+    planned_date (DD.MM.YYYY) — приоритетный источник (срок из реестра).
+    receipt_date (DD.MM.YYYY) — дата получения, для пересчёта если planned пуст.
+    Логика выбора — в compute_control_date (C+D).
     """
-    deadline = compute_control_date(planned_date, n_workdays)
-    if planned_date:
-        log.info(f"Срок: planned={planned_date} → используется {deadline}")
+    deadline = compute_control_date(planned_date, n_workdays, receipt_date)
+    if planned_date or receipt_date:
+        log.info(f"Срок: planned={planned_date!r} receipt={receipt_date!r} "
+                 f"→ используется {deadline}")
     # Приоритет — внутри #asudik-form-control_stage (стабильный id из дампа).
     inp = None
     try:
@@ -1805,11 +1829,13 @@ def process_one(driver, doc, index, total):
         toggle_switch(driver, "Контрольная резолюция", "true")
         time.sleep(0.5)
         # 7. Дата контрольного этапа: приоритетно — «Планируемая дата» из xlsx
-        # (срок ГИС ЖКХ). Если не задана/в прошлом — fallback today + N.
+        # (срок ГИС ЖКХ = min(получ+17раб, ГИС)). Если пуста — пересчёт из
+        # «Дата получения» (D). Просрочка не затирается на today+N (C).
         log.info(f"--- ШАГ 7/12: дата контрольного этапа ---")
         set_stage_date(driver,
             settings.get("workdays", cfg.DEFAULTS["workdays"]),
-            planned_date=doc.get('planned_date'))
+            planned_date=doc.get('planned_date'),
+            receipt_date=doc.get('receipt_date'))
         log.debug(f"  Шаги 6-7 OK ({time.monotonic()-t_start:.1f}s)")
 
     # 8. Исполнитель
