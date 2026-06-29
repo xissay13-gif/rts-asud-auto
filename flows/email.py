@@ -87,6 +87,53 @@ def _fix_mojibake(s):
     return s
 
 
+# ================= СРОК ИСПОЛНЕНИЯ (ГИС ЖКХ) =================
+
+def _parse_ddmmyyyy(s):
+    """Парсит DD.MM.YYYY (возможно с временем после) → date или None."""
+    if not s:
+        return None
+    m = re.match(r'\s*(\d{2})\.(\d{2})\.(\d{4})', str(s))
+    if not m:
+        return None
+    try:
+        return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    except ValueError:
+        return None
+
+
+def _add_working_days(start, n):
+    """start + n рабочих дней (сб/вс пропускаются). Возвращает date."""
+    cur = start
+    added = 0
+    while added < n:
+        cur += timedelta(days=1)
+        if cur.weekday() < 5:  # 0-4 = пн-пт
+            added += 1
+    return cur
+
+
+def _compute_zhkh_deadline(receipt_str, gis_date_str, working_days=17):
+    """Срок отработки обращения ГИС ЖКХ.
+
+    Правило (от пользователя): РТС даёт 17 РАБОЧИХ дней с даты получения.
+    НО если срок по ГИС ЖКХ (планируемая/крайняя дата) РАНЬШE — берём его.
+    То есть итог = min(дата_получения + 17 раб.дней, дата_ГИС).
+
+    receipt_str — «Дата получения» (может быть с временем).
+    gis_date_str — планируемая/крайняя дата из письма (DD.MM.YYYY) или None.
+
+    Возвращает строку DD.MM.YYYY или None если дату получения не распарсили.
+    """
+    receipt = _parse_ddmmyyyy(receipt_str)
+    if not receipt:
+        return None
+    rts = _add_working_days(receipt, working_days)
+    gis = _parse_ddmmyyyy(gis_date_str)
+    chosen = min(rts, gis) if gis else rts
+    return chosen.strftime("%d.%m.%Y")
+
+
 # ================= FOLDER CHECK WITH RETRY =================
 
 def _normalize_unc(folder):
@@ -408,11 +455,21 @@ def _parse_one_msg(msg_path, process_mode="mix"):
     # Для feedback дополнительно приклеиваем адрес из тела: «<subject> — <адрес>»
     # (subject обычно «Новый вопрос с сайта Омск РТС» — оставляем как есть,
     # юзеру удобнее видеть и его, и адрес).
+    # Срок отработки ГИС ЖКХ: РТС даёт 17 РАБОЧИХ дней с даты получения,
+    # но если срок по ГИС ЖКХ раньше — берём его (min из двух).
+    zhkh_deadline = None
+    if zhkh:
+        zhkh_deadline = _compute_zhkh_deadline(
+            zhkh.get('дата_обращения'), zhkh.get('планируемая_дата'))
+
     if feedback:
         addr = (feedback.get('адрес') or '').strip()
         soderzhanie = f"{clean_subject} — {addr}" if addr else clean_subject
     elif zhkh:
+        # В краткое содержание дописываем срок исполнения (если посчитался)
         soderzhanie = clean_subject
+        if zhkh_deadline:
+            soderzhanie = f"{clean_subject} (срок до {zhkh_deadline})"
     else:
         soderzhanie = body_clean
 
@@ -435,7 +492,10 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         # доп. полей АСУД-карточки.
         "номер_обращения":  zhkh.get('номер_обращения')  if zhkh else None,
         "дата_обращения":   zhkh.get('дата_обращения')   if zhkh else None,
-        "планируемая_дата": zhkh.get('планируемая_дата') if zhkh else None,
+        # Планируемая дата = вычисленный срок отработки (min(получ.+17 раб.дн,
+        # срок ГИС)). Этот же срок уходит в контрольную дату резолюции.
+        # Fallback на сырую дату ГИС если вычисление не удалось.
+        "планируемая_дата": (zhkh_deadline or zhkh.get('планируемая_дата')) if zhkh else None,
     }
 
 
