@@ -341,7 +341,7 @@ def _parse_one_msg(msg_path, process_mode="mix"):
     if zhkh:
         # ZHKH-письмо: тип 8 железно, классификатор скипаем
         type_idx = 8
-        log.info(f"{os.path.basename(msg_path)}: ГИС ЖКХ → {zhkh['фио']}, "
+        log.info(f"{os.path.basename(msg_path)}: ГИС ЖКХ → {zhkh.get('фио') or '(аноним)'}, "
                  f"№{zhkh.get('номер_обращения')} от {zhkh.get('дата_обращения')}")
     elif feedback:
         # Feedback-письмо: тип 8 (письма граждан), регистрация а не черновик
@@ -376,10 +376,12 @@ def _parse_one_msg(msg_path, process_mode="mix"):
     body_clean = mix_flow._clean_body(body) if body else clean_subject
 
     if zhkh:
-        correspondent = zhkh['фио']
-        corr_found = True
+        # ФИО может быть None для анонимных ГИС ЖКХ-писем (нет поля «Заявитель»)
+        # — тогда корреспондент = «Неизвестный», но номер/тема/адрес из zhkh
+        # всё равно используются.
+        correspondent = zhkh.get('фио') or unknown
+        corr_found = bool(zhkh.get('фио'))
         fio_src = "zhkh"
-        # ZHKH-парсер уже нашёл ФИО, force_draft гарантированно False
     elif feedback:
         correspondent = feedback['фио']
         corr_found = True
