@@ -28,6 +28,11 @@ from shared import config as cfg
 from shared.ui import wait_asud_loaded, set_driver_timeout
 from shared.correspondent import extract_fio_from_text
 from shared.okrug_parser import okrug_from_textbody
+from shared.deadline import (
+    parse_ddmmyyyy as _parse_ddmmyyyy,
+    add_working_days as _add_working_days,
+    compute_deadline as _compute_zhkh_deadline,
+)
 from shared.attachments import move_to_done, move_to_errors, move_to_drafts
 from shared.colors import green, yellow, red, status_colored
 from shared.classifier import classify_doc_type
@@ -85,53 +90,6 @@ def _fix_mojibake(s):
     except Exception:
         pass
     return s
-
-
-# ================= СРОК ИСПОЛНЕНИЯ (ГИС ЖКХ) =================
-
-def _parse_ddmmyyyy(s):
-    """Парсит DD.MM.YYYY (возможно с временем после) → date или None."""
-    if not s:
-        return None
-    m = re.match(r'\s*(\d{2})\.(\d{2})\.(\d{4})', str(s))
-    if not m:
-        return None
-    try:
-        return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-    except ValueError:
-        return None
-
-
-def _add_working_days(start, n):
-    """start + n рабочих дней (сб/вс пропускаются). Возвращает date."""
-    cur = start
-    added = 0
-    while added < n:
-        cur += timedelta(days=1)
-        if cur.weekday() < 5:  # 0-4 = пн-пт
-            added += 1
-    return cur
-
-
-def _compute_zhkh_deadline(receipt_str, gis_date_str, working_days=17):
-    """Срок отработки обращения ГИС ЖКХ.
-
-    Правило (от пользователя): РТС даёт 17 РАБОЧИХ дней с даты получения.
-    НО если срок по ГИС ЖКХ (планируемая/крайняя дата) РАНЬШE — берём его.
-    То есть итог = min(дата_получения + 17 раб.дней, дата_ГИС).
-
-    receipt_str — «Дата получения» (может быть с временем).
-    gis_date_str — планируемая/крайняя дата из письма (DD.MM.YYYY) или None.
-
-    Возвращает строку DD.MM.YYYY или None если дату получения не распарсили.
-    """
-    receipt = _parse_ddmmyyyy(receipt_str)
-    if not receipt:
-        return None
-    rts = _add_working_days(receipt, working_days)
-    gis = _parse_ddmmyyyy(gis_date_str)
-    chosen = min(rts, gis) if gis else rts
-    return chosen.strftime("%d.%m.%Y")
 
 
 # ================= FOLDER CHECK WITH RETRY =================
@@ -227,9 +185,10 @@ def _msg_link(msg, file_path):
 # заполняются позже («Отписано Халецкой» — после второго прохода ГИСЖКХ,
 # «Отписано в округ» — после прогона clean-resolutions).
 _REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body",
-                     "Планируемая дата", "Статус",
+                     "Дата получения", "Планируемая дата", "Статус",
                      "Отписано Халецкой", "Отписано в округ"]
-_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 80, 6: 16, 7: 28, 8: 18, 9: 18}
+_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 80, 6: 16, 7: 16, 8: 28,
+                    9: 18, 10: 18}
 
 
 def _xlsx_path(base_dir, suffix=None, target_folder=None):
@@ -307,12 +266,19 @@ def _append_dated_row(path, doc, asud_id, status="OK"):
 
     # Знакомые колонки → значения. ЛЮБОЕ имя колонки в шапке xlsx, которое
     # есть в этом словаре, будет заполнено. Остальные останутся пустыми.
+    # «Дата получения» — чистая DD.MM.YYYY из тела ГИС ЖКХ (без времени).
+    # Нужна P3 (clean-resolutions) чтобы пересчитать срок если «Планируемая
+    # дата» в реестре пустая. Для не-ГИС писем — пусто.
+    _recv = _parse_ddmmyyyy(doc.get("дата_обращения"))
+    recv_str = _recv.strftime("%d.%m.%Y") if _recv else ""
+
     values = {
         "Номер":             asud_id or "",
         "Link":              doc.get("link") or "",
         "Округ":             doc.get("округ_прогноз") or "",
         "Subject":           doc.get("тема") or "",
         "Body":              doc.get("содержание") or "",  # уже _clean_body
+        "Дата получения":    recv_str,
         "Планируемая дата":  doc.get("планируемая_дата") or "",
         "Статус":            status_text,
     }
