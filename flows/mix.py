@@ -379,6 +379,11 @@ def fill_corr_date(driver, override=None):
     Fallback — поиск по label-text + parent-walk.
     """
     today = override.strip() if override else date.today().strftime("%d.%m.%Y")
+    # Защита: override может прийти со временем («29.06.2026 15:36») — поле
+    # даты в АСУД принимает только DD.MM.YYYY, иначе остаётся пустым.
+    _m = re.match(r'(\d{2}\.\d{2}\.\d{4})', today)
+    if _m:
+        today = _m.group(1)
     inp = None
     try:
         container = driver.find_element(By.ID, "IncomingView-crspRegDate")
