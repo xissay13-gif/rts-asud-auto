@@ -432,10 +432,23 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         addr = (feedback.get('адрес') or '').strip()
         soderzhanie = f"{clean_subject} — {addr}" if addr else clean_subject
     elif zhkh:
-        # В краткое содержание дописываем срок исполнения (если посчитался)
-        soderzhanie = clean_subject
+        # Типовое краткое содержание ГИС ЖКХ:
+        #   «ГИС ЖКХ <номер обращения> <адрес> срок до <дата>»
+        # Все три поля — из структурного парсера. Пустые сегменты пропускаем.
+        zparts = ["ГИС ЖКХ"]
+        znum = (zhkh.get('номер_обращения') or '').strip()
+        zaddr = (zhkh.get('адрес') or '').strip()
+        if znum:
+            zparts.append(znum)
+        if zaddr:
+            zparts.append(zaddr)
         if zhkh_deadline:
-            soderzhanie = f"{clean_subject} (срок до {zhkh_deadline})"
+            zparts.append(f"срок до {zhkh_deadline}")
+        soderzhanie = " ".join(zparts)
+        # Подстраховка: если ни номера, ни адреса не распарсилось —
+        # откатываемся на тему письма, чтобы содержание не было голым «ГИС ЖКХ».
+        if not znum and not zaddr:
+            soderzhanie = clean_subject
     else:
         soderzhanie = body_clean
 
