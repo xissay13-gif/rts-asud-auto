@@ -50,6 +50,14 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 log = logging.getLogger("asud")
+
+# extract_msg/olefile очень шумные на INFO — для каждого отсутствующего
+# необязательного стрима пишут «Stream ... was requested but could not be
+# found». Это НЕ ошибки (у писем просто нет части опциональных свойств —
+# SMTP отправителя, message-id и т.п.). Глушим до WARNING.
+for _noisy in ("extract_msg", "olefile"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 start_time = time.monotonic()
 
 settings = {}
