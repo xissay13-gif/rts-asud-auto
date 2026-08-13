@@ -307,16 +307,15 @@ def js_set_value(driver, element, value):
 
 _FIND_OPTIONS_JS = """
 const text = arguments[0], inp = arguments[1];
-const xp = `//*[contains(text(),"${text}")]`;
-const snap = document.evaluate(xp, document, null,
-    XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+const needle = String(text || '').toLocaleLowerCase('ru-RU');
+const nodes = document.querySelectorAll('div,span,td,li,a');
 const out = [];
-for (let i = 0; i < snap.snapshotLength; i++) {
-    const r = snap.snapshotItem(i);
+for (const r of nodes) {
     if (!r.offsetParent) continue;
     if (r === inp) continue;
     if (r.tagName === 'INPUT') continue;
     if ((r.textContent || '').length > 150) continue;
+    if (!(r.textContent || '').toLocaleLowerCase('ru-RU').includes(needle)) continue;
     out.push(r);
 }
 return out;

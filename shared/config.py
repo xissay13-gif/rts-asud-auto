@@ -34,9 +34,24 @@ DEFAULTS = {
     # Таймаут загрузки страниц ASUD (page_load + urllib3 client). 300с = 5 минут.
     # Поднят с дефолтных 120с т.к. ASUD иногда долго инициализируется.
     "asud_load_timeout_sec": 300,
+    # Регистрация файлов из выгрузки СБИС. Каждый файл становится отдельным
+    # входящим документом; номер «б/н (N)» хранится в state рядом с файлами.
+    "sbis": {
+        "input_dir": "",
+        "surname_override": "",
+        "doc_type_index": 8,
+        "person_doc_type_index": 8,
+        "legal_doc_type_index": 5,
+        "include_extension_in_content": False,
+        "extensions": [
+            ".pdf", ".doc", ".docx", ".rtf", ".txt",
+            ".xls", ".xlsx", ".xml", ".zip",
+            ".jpg", ".jpeg", ".png", ".tif", ".tiff",
+        ],
+    },
     # Пресеты сценариев — список словарей. Поля:
     #   name          — отображение в меню
-    #   mode          — 'mix' / 'smart' / 'auto-create' / 'email'
+    #   mode          — 'mix' / 'smart' / 'auto-create' / 'email' / 'sbis'
     #   folder        — источник .msg-писем для email-flow
     #   xlsx          — путь к реестру для mix/auto-create/smart (опциональный)
     #   outlook_dir   — папка где искать .msg по Link для mix-вложений
@@ -67,6 +82,12 @@ DEFAULTS = {
             "folder": "D:\\OutlookSubjects\\ГИСЖКХ",
             "outlook_dir": "D:\\OutlookSubjects\\ГИСЖКХ",
             "output_suffix": "ГИСЖКХ",
+        },
+        {
+            "id": "sbis",
+            "name": "SBIS",
+            "mode": "sbis",
+            "folder": "",
         },
     ],
 }

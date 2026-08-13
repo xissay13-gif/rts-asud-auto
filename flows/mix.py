@@ -1077,7 +1077,11 @@ def create_one_document(driver, doc_data, index, total):
 
     # [4/7] Заполнение формы
     fill_text(driver, doc_data["содержание"])
-    fill_correspondent_field(driver, doc_data["корреспондент"])
+    fill_correspondent_field(
+        driver,
+        doc_data["корреспондент"],
+        kind=doc_data.get("корреспондент_тип", "person"),
+    )
     fill_corr_number(driver, doc_data.get("link"),
                       override=doc_data.get("номер_обращения"))
     fill_corr_date(driver, override=doc_data.get("дата_обращения"))
@@ -1123,8 +1127,17 @@ def create_one_document(driver, doc_data, index, total):
             log.info(f"Документ {index}/{total}: вложение прикреплено ✓")
         else:
             log.warning(f"Документ {index}/{total}: вложение НЕ прикреплено ✗")
+            if doc_data.get("require_attachment"):
+                _last_result["status"] = "FAILED"
+                close_card_and_wait_main(driver)
+                raise RuntimeError(
+                    f"обязательное вложение не прикрепилось: {attach_path}")
     else:
         log.info("Нет файла — пропускаю")
+        if doc_data.get("require_attachment"):
+            _last_result["status"] = "FAILED"
+            close_card_and_wait_main(driver)
+            raise RuntimeError("обязательное вложение не найдено")
 
     # [7/7] Регистрация (если ФИО найдено) или черновик
     asud_id = None

@@ -3,7 +3,7 @@ shared/feedback_parser.py — Парсер писем «Новый вопрос 
 (обратная связь с сайта customer.omskrts.ru → пересылка через feedback@).
 
 Эти письма имеют структурный body с прямыми лейблами:
-  Фамилия, имя, отчество: <ФИО>
+  Фамилия, имя, отчество: <ФИО>  (в новых письмах может отсутствовать)
   Адрес электронной почты: <email>
   Адрес: <адрес>
   Лицевой счет: <ЛС>
@@ -69,7 +69,7 @@ def parse_feedback_body(body, subject=None):
 
     Структура dict:
       {
-        'фио':              'Токарева Лариса Михайловна',
+        'фио':              'Токарева Лариса Михайловна',  # или None
         'фамилия':          'Токарева',     # первое слово ФИО
         'имя':              'Лариса',       # второе
         'отчество':         'Михайловна',   # третье (если есть)
@@ -79,6 +79,8 @@ def parse_feedback_body(body, subject=None):
         'телефон':          '8 (796) 204-78-06',
         'тема_вопроса':     'Перерасчёт [81]',
         'вопрос':           'Ошибка в передачи данных...',
+        'корреспондент':     'Токарева Лариса Михайловна',  # либо адрес
+        'корреспондент_тип': 'person',       # либо address
       }
 
     None если body не похоже на feedback-формат.
@@ -96,19 +98,30 @@ def parse_feedback_body(body, subject=None):
             return None
 
     fio = _find_field(text, 'Фамилия, имя, отчество')
-    if not fio:
-        log.debug("feedback-парсер: лейбл «Фамилия, имя, отчество» не найден")
-        return None
-
-    parts = fio.split()
+    parts = fio.split() if fio else []
     surname = parts[0] if parts else None
     name = parts[1] if len(parts) > 1 else None
     patronymic = parts[2] if len(parts) > 2 else None
 
-    # ФИО — минимум 2 части (Фамилия + Имя). Иначе считаем что промахнулись.
-    if not (surname and name):
+    # В старом шаблоне было ФИО, в новом его может не быть совсем. Неполное
+    # значение не используем как корреспондента, но не отбрасываем всё письмо:
+    # адрес всё равно нужен для краткого содержания и ручной обработки.
+    if fio and not (surname and name):
         log.debug(f"feedback-парсер: некорректное ФИО {fio!r} (нужно ≥2 слов)")
-        return None
+        fio = surname = name = patronymic = None
+
+    address = _find_field(text, 'Адрес')
+    if fio:
+        correspondent = fio
+        correspondent_kind = 'person'
+    elif address:
+        # Новый шаблон feedback не передаёт ФИО. Для таких писем адрес
+        # становится значением поля «Фамилия», а Имя/Отчество не заполняются.
+        correspondent = address
+        correspondent_kind = 'address'
+    else:
+        correspondent = None
+        correspondent_kind = 'person'
 
     return {
         'фио':           fio,
@@ -116,9 +129,11 @@ def parse_feedback_body(body, subject=None):
         'имя':           name,
         'отчество':      patronymic,
         'email':         _find_field(text, 'Адрес электронной почты'),
-        'адрес':         _find_field(text, 'Адрес'),
+        'адрес':         address,
         'лицевой_счет':  _find_field(text, 'Лицевой счет') or _find_field(text, 'Лицевой счёт'),
         'телефон':       _find_field(text, 'Телефон'),
         'тема_вопроса':  _find_field(text, 'Тема вопроса'),
         'вопрос':        _extract_question(text),
+        'корреспондент': correspondent,
+        'корреспондент_тип': correspondent_kind,
     }

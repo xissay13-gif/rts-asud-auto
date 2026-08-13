@@ -411,7 +411,9 @@ def _parse_one_msg(msg_path, process_mode="mix"):
     # для ZHKH-писем тип всегда 8 (письма граждан), классификатор не трогаем.
     zhkh = parse_zhkh_body(body)
     # Feedback с сайта Омск РТС («Новый вопрос с сайта Омск РТС») — структурный
-    # парсер. ФИО заявителя указано явно в теле → авто-регистрация, не черновик.
+    # парсер. Старый шаблон содержит ФИО, новый может содержать только адрес.
+    # Без ФИО используем адрес как корреспондента: весь адрес идёт в поле
+    # «Фамилия», а Имя/Отчество при создании карточки не заполняются.
     # Парсим ТОЛЬКО если не ZHKH (zhkh > feedback по приоритету).
     feedback = None if zhkh else parse_feedback_body(body, subject=subject)
 
@@ -422,10 +424,13 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         log.info(f"{os.path.basename(msg_path)}: ГИС ЖКХ → {zhkh.get('фио') or '(аноним)'}, "
                  f"№{zhkh.get('номер_обращения')} от {zhkh.get('дата_обращения')}")
     elif feedback:
-        # Feedback-письмо: тип 8 (письма граждан), регистрация а не черновик
+        # Feedback-письмо: тип 8 (письма граждан). Корреспондентом будет ФИО
+        # из старого шаблона либо адрес из нового.
         type_idx = 8
         log.info(f"{os.path.basename(msg_path)}: feedback Омск РТС → "
-                 f"{feedback['фио']}, ЛС {feedback.get('лицевой_счет') or '—'}")
+                 f"{feedback.get('фио') or '(без ФИО)'}, "
+                 f"адрес {feedback.get('адрес') or '—'}, "
+                 f"ЛС {feedback.get('лицевой_счет') or '—'}")
     elif process_mode == "smart":
         # Не ZHKH: для smart-режима пускаем общий классификатор
         type_idx = classify_doc_type(body)
@@ -453,6 +458,7 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         clean_subject = f"ГИС ЖКХ {clean_subject}"
     body_clean = mix_flow._clean_body(body) if body else clean_subject
 
+    correspondent_kind = "person"
     if zhkh:
         # ФИО может быть None для анонимных ГИС ЖКХ-писем (нет поля «Заявитель»)
         # — тогда корреспондент = «Неизвестный», но номер/тема/адрес из zhkh
@@ -461,8 +467,9 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         corr_found = bool(zhkh.get('фио'))
         fio_src = "zhkh"
     elif feedback:
-        correspondent = feedback['фио']
-        corr_found = True
+        correspondent = feedback.get('корреспондент') or unknown
+        corr_found = bool(feedback.get('корреспондент'))
+        correspondent_kind = feedback.get('корреспондент_тип') or "person"
         fio_src = "feedback"
     elif force_draft:
         # Smart + cat-0: принудительно черновик с фикс. корреспондентом
@@ -521,6 +528,7 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         "row_idx": 1,
         "содержание": soderzhanie,
         "корреспондент": correspondent,
+        "корреспондент_тип": correspondent_kind,
         "корр_найден": corr_found,
         "корр_источник": fio_src,
         "тема": clean_subject,
@@ -594,7 +602,7 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
     if process_mode == "smart" and doc.get("корр_источник") not in ("zhkh", "feedback"):
         # Smart-пресет: каждый .msg создаётся как черновик с фикс. корреспондентом.
         # Исключение — структурно распознанные письма (ZHKH / feedback): у них
-        # ФИО заявителя в теле явно, оно надёжное → пускаем в регистрацию.
+        # корреспондент надёжно получен из отдельного поля ФИО либо адреса.
         doc["корр_найден"] = False
         doc["корреспондент"] = settings.get("unknown_correspondent",
                                              cfg.DEFAULTS["unknown_correspondent"])

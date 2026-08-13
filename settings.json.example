@@ -39,6 +39,12 @@
       ],
       "round_robin": true,
       "delete_after_done": true
+    },
+    {
+      "id": "sbis",
+      "name": "СБИС — регистрация входящих",
+      "mode": "sbis",
+      "folder": "D:\\SBIS\\sbis_downloads\\КоррВх"
     }
   ],
 
@@ -48,6 +54,16 @@
 
   "asud_url": "https://asud.interrao.ru/asudik/",
   "unknown_correspondent": "Неизвестный Неизвестный Неизвестный",
+
+  "_comment_sbis": "Режим sbis регистрирует каждый PDF отдельно. Имена [ФЛ][Полное ФИО] Содержание.pdf и [ЮЛ][Полное название] Содержание.pdf разбираются без чтения PDF. ФЛ ищется/создаётся по ФИО и получает тип 8; для ЮЛ полное название записывается в фамилию, имя и отчество — прочерки, тип 5. Номер — б/н (N). Старые имена тоже поддерживаются.",
+  "sbis": {
+    "surname_override": "",
+    "doc_type_index": 8,
+    "person_doc_type_index": 8,
+    "legal_doc_type_index": 5,
+    "include_extension_in_content": false,
+    "extensions": [".pdf", ".doc", ".docx", ".rtf", ".txt", ".xls", ".xlsx", ".xml", ".zip", ".jpg", ".jpeg", ".png", ".tif", ".tiff"]
+  },
 
   "_comment_zhkh_daemon": "Конфиг непрерывного daemon'а под Басмановым (mode=zhkh-daemon). Опрашивает реестры в каждые poll_interval_sec секунд, для новых строк (Номер заполнен, «Отписано Халецкой» пуст) выдаёт резолюцию Халецкой. round_robin: true → каждый тик берёт ОДИН реестр по очереди (тик1=ГИСЖКХ, тик2=ТЭС, тик3=ОЭК, тик4=ГИСЖКХ,...). false (дефолт) → каждый тик все реестры.",
   "zhkh_daemon": {

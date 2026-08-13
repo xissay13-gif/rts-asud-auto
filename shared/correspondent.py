@@ -139,19 +139,56 @@ def match_strict(text, full_name):
     return False
 
 
-def create_correspondent(driver, person_name):
-    """Создаёт нового корреспондента через 7-шаговый flow."""
-    parts = person_name.strip().split()
-    if not parts:
-        log.error("Пустое ФИО")
-        return
+def _is_legal_kind(kind):
+    return str(kind or "").strip().casefold() in {
+        "legal", "organization", "org", "юл", "юрлицо", "юридическое лицо",
+    }
+
+
+def _is_address_kind(kind):
+    return str(kind or "").strip().casefold() in {
+        "address", "feedback-address", "feedback_address", "адрес",
+    }
+
+
+def correspondent_card_parts(name, kind="person"):
+    """Возвращает значения полей Фамилия/Имя/Отчество для новой карточки."""
+    value = " ".join(str(name or "").split())
+    if not value:
+        return "", "", ""
+    if _is_address_kind(kind):
+        return value, "", ""
+    if _is_legal_kind(kind):
+        return value, "-", "-"
+    parts = value.split()
     surname = parts[0]
     first_name = parts[1] if len(parts) >= 2 else "Н"
     middle_name = parts[2] if len(parts) >= 3 else "Н"
-    if len(parts) < 3:
+    return surname, first_name, middle_name
+
+
+def match_legal_correspondent(text, legal_name):
+    """Строго сверяет полное название ЮЛ, игнорируя пунктуацию и пробелы."""
+    expected = _norm_no_space(str(legal_name or ""))
+    actual = _norm_no_space(str(text or ""))
+    return bool(expected) and expected in actual
+
+
+def create_correspondent(driver, person_name, kind="person"):
+    """Создаёт нового корреспондента через 7-шаговый flow."""
+    legal = _is_legal_kind(kind)
+    address_only = _is_address_kind(kind)
+    surname, first_name, middle_name = correspondent_card_parts(
+        person_name, kind)
+    if not surname:
+        log.error("Пустое имя корреспондента")
+        return
+    if not legal and not address_only and len(person_name.strip().split()) < 3:
         log.warning(f"Неполное ФИО '{person_name}' → недостающие = 'Н'")
 
-    log.info(f"Создаю корреспондента: {surname} {first_name} {middle_name}")
+    kind_label = "ЮЛ" if legal else ("АДРЕС" if address_only else "ФЛ")
+    log.info(f"Создаю корреспондента ({kind_label}): "
+             f"{surname} {first_name} {middle_name}")
 
     # ШАГ 1: Клик "+" у Корреспондент
     log.info("[1/7] Клик '+' у Корреспондент")
@@ -345,9 +382,12 @@ def create_correspondent(driver, person_name):
             ("Фамилия", surname, "outer_person_dialog-last_name-input"),
             ("Имя", first_name, "outer_person_dialog-first_name-input"),
             ("Отчество", middle_name, "outer_person_dialog-middle_name-input"),
-            ("Должность", "ФЛ", "outer_person_dialog-position-input"),
+            ("Должность", "ЮЛ" if legal else "ФЛ", "outer_person_dialog-position-input"),
         ]
         for label_text, value, input_id in fields:
+            if address_only and label_text in ("Имя", "Отчество"):
+                log.info(f"  {label_text}: не заполняется (корреспондент-адрес)")
+                continue
             result = driver.execute_script("""
                 var inputId = arguments[0]; var value = arguments[1];
                 var el = document.getElementById(inputId);
@@ -458,12 +498,15 @@ def _correspondent_field_value(driver):
         return ""
 
 
-def fill_correspondent_field(driver, person_name):
+def fill_correspondent_field(driver, person_name, kind="person"):
     """Заполняет поле Корреспондент через combobox.
     Если не найден по инициалам — создаёт нового.
     Пост-верификация: после клика проверяет что поле реально заполнилось;
     иначе падает в create_correspondent."""
-    log.info(f"Корреспондент: {person_name}")
+    legal = _is_legal_kind(kind)
+    address_only = _is_address_kind(kind)
+    kind_label = "ЮЛ" if legal else ("АДРЕС" if address_only else "ФЛ")
+    log.info(f"Корреспондент ({kind_label}): {person_name}")
     time.sleep(1)
 
     inp = find_input_near_label(driver, "Корреспондент")
@@ -472,25 +515,27 @@ def fill_correspondent_field(driver, person_name):
         return
 
     surname = person_name.split()[0]
-    initials = fio_to_initials(person_name)
+    exact_name = legal or address_only
+    search_value = person_name if exact_name else surname
+    initials = person_name if exact_name else fio_to_initials(person_name)
 
     inp.click()
     # Combobox-autocomplete: JS-set + dispatch events открывают выпадашку
-    js_type_combobox(driver, inp, surname)
-    log.info(f"Введена фамилия (JS): {surname}")
+    js_type_combobox(driver, inp, search_value)
+    log.info(f"Введён поиск (JS): {search_value}")
 
     all_results = []
     try:
         WebDriverWait(driver, 5).until(
-            lambda d: len(find_dropdown_options(d, surname, inp)) > 0)
-        all_results = find_dropdown_options(driver, surname, inp)
+            lambda d: len(find_dropdown_options(d, search_value, inp)) > 0)
+        all_results = find_dropdown_options(driver, search_value, inp)
     except Exception:
         from selenium.webdriver.common.keys import Keys as _Keys
         try:
             inp.send_keys(_Keys.ENTER)
             WebDriverWait(driver, 3).until(
-                lambda d: len(find_dropdown_options(d, surname, inp)) > 0)
-            all_results = find_dropdown_options(driver, surname, inp)
+                lambda d: len(find_dropdown_options(d, search_value, inp)) > 0)
+            all_results = find_dropdown_options(driver, search_value, inp)
         except Exception:
             pass
 
@@ -502,7 +547,8 @@ def fill_correspondent_field(driver, person_name):
     for idx, r in enumerate(all_results, 1):
         try:
             raw = r.text
-            ok = match_strict(raw, person_name)
+            ok = (match_legal_correspondent(raw, person_name) if exact_name
+                  else match_strict(raw, person_name))
             preview = raw.strip().replace('\n', ' ')[:80]
             # Логируем tag + class для диагностики что именно за элемент
             try:
@@ -547,7 +593,8 @@ def fill_correspondent_field(driver, person_name):
             for _ in range(timeout_iters):
                 time.sleep(0.2)
                 val = _correspondent_field_value(driver)
-                if val and surname.lower() in val.lower():
+                if val and (match_legal_correspondent(val, person_name) if exact_name
+                            else surname.lower() in val.lower()):
                     return val
             return None
 
@@ -620,4 +667,4 @@ def fill_correspondent_field(driver, person_name):
         time.sleep(0.5)
     except Exception:
         pass
-    create_correspondent(driver, person_name)
+    create_correspondent(driver, person_name, kind=kind)

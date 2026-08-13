@@ -8,6 +8,8 @@ app.py — Единая точка входа для АСУД-автоматиз
                   корреспондент = «Неизвестный Неизвестный Неизвестный»)
   • email       — создание прямо из .msg-писем (без xlsx-реестра): рекурсивно
                   обходит папку, парсит письма, ФИО абонента берёт из тела.
+  • sbis        — регистрация PDF из СБИС: ФЛ по полному ФИО, ЮЛ по полному
+                  названию с прочерками в имени и отчестве.
 
 Выдача резолюций — отдельный exe, ветка clean-resolutions.
 
@@ -17,11 +19,13 @@ app.py — Единая точка входа для АСУД-автоматиз
   python app.py --mode=auto-create
   python app.py --mode=smart
   python app.py --mode=email
+  python app.py --mode=sbis --folder=path
   python app.py --xlsx=path.xlsx --mode=...
   python app.py --folder=path         # → авто-режим email
   python app.py --headless            # фоновый режим (Edge без GUI)
 
 Auto-detect:
+  • Передан --mode=sbis                                      → sbis
   • Передан --folder или --mode=email                         → email
   • Лист содержит колонку 'Link' (старый mix-формат)          → mix
   • Лист 'результат' (новый формат) или Subject/корреспондент → auto-create
@@ -51,9 +55,10 @@ _MODE_DESCRIPTIONS = {
     'auto-create': 'Создание + регистрация + На резолюцию (без .msg)',
     'smart':       'Создание как черновик + .msg (без регистрации, фикс. корреспондент)',
     'email':       'Создание прямо из .msg-писем (без xlsx-реестра)',
+    'sbis':        'Регистрация файлов из выгрузки СБИС',
     'zhkh-daemon': 'Постоянный мониторинг реестров → Басманов выдаёт резолюции Халецкой',
 }
-_MODES = ['mix', 'auto-create', 'smart', 'email', 'zhkh-daemon']
+_MODES = ['mix', 'auto-create', 'smart', 'email', 'sbis', 'zhkh-daemon']
 
 
 def detect_mode(xlsx_path):
@@ -80,7 +85,7 @@ def detect_mode(xlsx_path):
 def pick_mode(xlsx_path):
     """Интерактивный выбор режима с подсказкой auto-detect.
     Email-режим в этом меню не показываем — он работает с папкой, не с xlsx."""
-    xlsx_modes = [m for m in _MODES if m != 'email']
+    xlsx_modes = ['mix', 'auto-create', 'smart']
     auto = detect_mode(xlsx_path)
     print(f"\nРеестр: {os.path.basename(xlsx_path)}")
     print("Какой процесс запустить?")
@@ -99,13 +104,18 @@ def pick_mode(xlsx_path):
 
 
 def pick_source():
-    """Интерактивный верхне-уровневый выбор: реестр (xlsx) или папка с .msg.
+    """Интерактивный верхне-уровневый выбор источника.
     Вызывается когда юзер не передал ни --mode, ни --xlsx, ни --folder."""
     print("\nЧто обработать?")
     print("  1. Реестр (.xlsx)        — режимы mix / auto-create / smart")
     print("  2. Папку с .msg-письмами — режим email")
-    choice = input("Номер (1-2) [1]: ").strip()
-    return 'email' if choice == '2' else 'xlsx'
+    print("  3. Файлы из выгрузки СБИС — режим sbis")
+    choice = input("Номер (1-3) [1]: ").strip()
+    if choice == '2':
+        return 'email'
+    if choice == '3':
+        return 'sbis'
+    return 'xlsx'
 
 
 def pick_preset(presets):
@@ -127,13 +137,33 @@ def pick_preset(presets):
         return None
 
 
+def find_preset(presets, selector):
+    """Find a preset by stable id or exact display name."""
+    needle = str(selector or "").strip().casefold()
+    if not needle:
+        return None
+    for preset in presets:
+        if not isinstance(preset, dict):
+            continue
+        candidates = (preset.get("id", ""), preset.get("name", ""))
+        if any(str(value).strip().casefold() == needle for value in candidates):
+            return preset
+    return None
+
 def main():
     parser = argparse.ArgumentParser(
         description="АСУД ИК — автоматизация документооборота")
     parser.add_argument('--mode', choices=_MODES,
                         help="Режим работы (если не задан — auto-detect по xlsx)")
     parser.add_argument('--xlsx', help="Путь к реестру (если не задан — спрашиваем)")
-    parser.add_argument('--folder', help="Папка с .msg-письмами (включает режим email)")
+    parser.add_argument('--folder', help="Папка-источник для режимов email/sbis")
+    parser.add_argument('--preset',
+                        help="Preset id or exact name from settings.json")
+    parser.add_argument('--surname',
+                        help="Фамилия корреспондента для всей партии в режиме sbis; "
+                             "если не задана — берётся из имени файла")
+    parser.add_argument('--reset-state', action='store_true',
+                        help="Сбросить нумерацию и список обработанных файлов sbis")
     parser.add_argument('--watch', action='store_true',
                         help="Непрерывный мониторинг папки (только email-режим). "
                              "Ctrl+C — остановка после текущего документа")
@@ -155,12 +185,34 @@ def main():
     # Глобальный flag delete_after_done (если есть в settings.json) тоже подхватываем
     if settings_data.get("delete_after_done"):
         os.environ.setdefault('ASUD_DELETE_AFTER_DONE', '1')
-    no_flags = not (args.mode or args.xlsx or args.folder)
-    if no_flags and presets:
+    no_flags = not (args.mode or args.xlsx or args.folder or args.preset)
+    preset = None
+    if args.preset:
+        preset = find_preset(presets, args.preset)
+        if preset is None and args.preset.casefold() == "sbis":
+            legacy_folder = str(
+                (settings_data.get("sbis") or {}).get("input_dir") or ""
+            ).strip()
+            if legacy_folder:
+                preset = {
+                    "id": "sbis",
+                    "name": "SBIS",
+                    "mode": "sbis",
+                    "folder": legacy_folder,
+                }
+                log.warning(
+                    "Legacy sbis.input_dir is in use; move the path "
+                    "to presets[].folder")
+        if preset is None:
+            log.error(f"Preset '{args.preset}' was not found in settings.json")
+            sys.exit(1)
+    elif no_flags and presets:
         preset = pick_preset(presets)
         if preset is None:
             log.error("Пресет не выбран — выход")
             sys.exit(1)
+
+    if preset is not None:
         log.info(f"Пресет: {preset.get('name', '?')}")
         # Заполняем args из пресета и продолжаем обычный flow
         if preset.get("folder"):
@@ -201,8 +253,10 @@ def main():
         if preset.get("delete_after_done"):
             os.environ['ASUD_DELETE_AFTER_DONE'] = '1'
 
-    # === Определяем источник: email vs xlsx =================================
-    if args.folder or args.mode == 'email':
+    # === Определяем источник: sbis vs email vs xlsx ==========================
+    if args.mode == 'sbis':
+        source = 'sbis'
+    elif args.folder or args.mode == 'email':
         source = 'email'
     elif args.xlsx or args.mode in ('mix', 'auto-create', 'smart'):
         # Если пришёл флаг 'smart' или 'mix' С --folder — это email-источник
@@ -220,6 +274,22 @@ def main():
         log.info("Режим: zhkh-daemon (мониторинг реестров под Басмановым)")
         os.environ['ASUD_MODE'] = 'zhkh-daemon'
         from flows.zhkh_daemon import main as flow_main
+        flow_main()
+        return
+
+    # === СБИС-источник ======================================================
+    if source == 'sbis':
+        if args.folder:
+            os.environ['ASUD_SBIS_DIR'] = args.folder
+            log.info(f"Режим: sbis (папка: {args.folder})")
+        else:
+            log.info("Режим: sbis")
+        if args.surname:
+            os.environ['ASUD_SBIS_SURNAME'] = args.surname
+        if args.reset_state:
+            os.environ['ASUD_SBIS_RESET_STATE'] = '1'
+        os.environ['ASUD_MODE'] = 'sbis'
+        from flows.sbis import main as flow_main
         flow_main()
         return
 
