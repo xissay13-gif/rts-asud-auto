@@ -8,6 +8,7 @@ from shared.ui import DropdownOptions
 
 
 ADDRESS = "644021, г. Омск, ул. 4-я Транспортная, д. 15, кв. 8"
+FIO = "Камшилин Сергей Александрович"
 
 
 class _ImmediateWait:
@@ -346,6 +347,76 @@ class CorrespondentSelectionTests(unittest.TestCase):
             )
 
         create_mock = mocks[-1]
+        self.assertIs(result, False)
+        create_mock.assert_called_once_with(driver, ADDRESS, kind="address")
+
+    def test_created_card_is_requeried_and_selected_without_second_creation(self):
+        """ASUD may save a person card without binding it to the document."""
+        driver = _Driver(parent_option=None)
+        inp = _Input()
+        candidate = _Candidate(FIO, css_class="x-boundlist-item")
+        lookups = [
+            DropdownOptions([], popup_seen=True, empty_explicit=True),
+            DropdownOptions([candidate], popup_seen=True, input_value="Камшилин"),
+        ]
+
+        with (
+            patch.object(correspondent.time, "sleep", return_value=None),
+            patch.object(correspondent, "WebDriverWait", _ImmediateWait),
+            patch.object(
+                correspondent, "find_input_near_label", return_value=inp
+            ),
+            patch.object(correspondent, "js_type_combobox", return_value=None),
+            patch.object(
+                correspondent, "find_dropdown_options", side_effect=lookups
+            ) as lookup_mock,
+            patch.object(
+                correspondent, "create_correspondent", return_value=True
+            ) as create_mock,
+            patch.object(
+                correspondent,
+                "_wait_for_correspondent_value",
+                side_effect=["", FIO],
+            ),
+            patch.object(
+                correspondent, "_clear_query_before_option_click", return_value=True
+            ),
+            patch.object(correspondent, "cdp_click", return_value=True),
+        ):
+            result = correspondent.fill_correspondent_field(
+                driver, FIO, kind="person"
+            )
+
+        self.assertIs(result, True)
+        create_mock.assert_called_once_with(driver, FIO, kind="person")
+        self.assertEqual(lookup_mock.call_count, 2)
+
+    def test_created_card_not_yet_indexed_never_creates_a_duplicate(self):
+        driver = _Driver(parent_option=None)
+        inp = _Input()
+        empty = DropdownOptions([], popup_seen=True, empty_explicit=True)
+
+        with (
+            patch.object(correspondent.time, "sleep", return_value=None),
+            patch.object(correspondent, "WebDriverWait", _ImmediateWait),
+            patch.object(
+                correspondent, "find_input_near_label", return_value=inp
+            ),
+            patch.object(correspondent, "js_type_combobox", return_value=None),
+            patch.object(
+                correspondent, "find_dropdown_options", return_value=empty
+            ),
+            patch.object(
+                correspondent, "create_correspondent", return_value=True
+            ) as create_mock,
+            patch.object(
+                correspondent, "_wait_for_correspondent_value", return_value=""
+            ),
+        ):
+            result = correspondent.fill_correspondent_field(
+                driver, ADDRESS, kind="address"
+            )
+
         self.assertIs(result, False)
         create_mock.assert_called_once_with(driver, ADDRESS, kind="address")
 

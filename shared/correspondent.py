@@ -325,7 +325,7 @@ def _find_visible(driver, by, selector):
 
 
 def create_correspondent(driver, person_name, kind="person"):
-    """Создаёт корреспондента и возвращает True только после проверки поля."""
+    """Создаёт карточку; привязка к документу проверяется вызывающим кодом."""
     legal = _is_legal_kind(kind)
     address_only = _is_address_kind(kind)
     surname, first_name, middle_name = correspondent_card_parts(
@@ -619,8 +619,15 @@ def create_correspondent(driver, person_name, kind="person"):
         if selected:
             log.info(f"Корреспондент создан и выбран: {shown_card_name}")
             return True
-        log.error("Корреспондент создан, но исходное поле не подтвердило выбор")
-        return False
+        # Живой АСУД сохраняет карточку после шага 5, но не всегда переносит
+        # созданное физлицо обратно в исходный combobox после «Готово».
+        # Это не ошибка создания: вызывающий код повторно найдёт уже созданную
+        # запись в справочнике и выберет её, не запуская создание второй раз.
+        log.warning(
+            "Карточка корреспондента создана, но не подставилась в документ — "
+            "выберу созданную запись из справочника"
+        )
+        return True
     except Exception as e:
         log.error(f"Шаг 7: {e}")
         close_open_modals(driver)
@@ -903,7 +910,7 @@ def _clear_query_before_option_click(driver, input_element, option_element):
         return False
 
 
-def fill_correspondent_field(driver, person_name, kind="person"):
+def fill_correspondent_field(driver, person_name, kind="person", *, allow_create=True):
     """Выбирает существующего или создаёт нового корреспондента.
 
     Возвращает True только когда значение исходного поля подтверждено.
@@ -1190,7 +1197,13 @@ def fill_correspondent_field(driver, person_name, kind="person"):
         )
         return False
 
-    # Нет совпадения — создаём нового
+    # Нет совпадения — создаём нового. После успешного создания этот же
+    # поиск вызывается повторно с allow_create=False: так мы привязываем
+    # карточку к документу, но никогда не создаём дубль при задержке индекса.
+    if not allow_create:
+        log.warning("Созданный корреспондент не найден в этой попытке выбора")
+        return False
+
     shown_initials = "<адрес>" if address_only else initials
     log.info(f"'{shown_initials}' не найден — создаю нового")
     from selenium.webdriver.common.keys import Keys as _Keys
@@ -1221,6 +1234,19 @@ def fill_correspondent_field(driver, person_name, kind="person"):
         driver, person_name, kind=kind, timeout=2,
         allow_closed_input=True, baseline_input="")
     if not selected:
-        log.error("После создания поле Корреспондент осталось неподтверждённым")
+        for attempt in range(1, 3):
+            log.info(
+                "Ищу созданного корреспондента и привязываю к документу "
+                f"(попытка {attempt}/2)"
+            )
+            if fill_correspondent_field(
+                    driver, person_name, kind=kind, allow_create=False):
+                return True
+            if attempt < 2:
+                time.sleep(1)
+        log.error(
+            "Созданный корреспондент пока не появился в справочнике — "
+            "повторите документ позже: новая карточка уже существует"
+        )
         return False
     return True

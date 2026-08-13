@@ -240,6 +240,42 @@ class CorrespondentCreationFlowTests(unittest.TestCase):
         click_mock.assert_not_called()
         visible_wait_mock.assert_not_called()
 
+    def test_saved_card_without_auto_binding_is_recoverable(self):
+        """Creation success and binding success are separate ASUD transitions."""
+        driver = _CreationDriver()
+
+        with (
+            patch.object(correspondent.time, "sleep", return_value=None),
+            patch.object(correspondent, "WebDriverWait", _ImmediateWait),
+            patch.object(
+                correspondent,
+                "find_input_near_label",
+                return_value=_Element("correspondent-input"),
+            ),
+            patch.object(
+                correspondent,
+                "_find_correspondent_add_button",
+                return_value=_Element("plus"),
+            ),
+            patch.object(
+                correspondent,
+                "_wait_visible_xpath",
+                return_value=_Element("xpath-result"),
+            ),
+            patch.object(correspondent, "click", return_value=True),
+            patch.object(
+                correspondent, "_wait_for_correspondent_value", return_value=""
+            ),
+            patch.object(correspondent, "close_open_modals") as close_mock,
+            patch.object(ui, "wait_modal_closed"),
+        ):
+            result = correspondent.create_correspondent(
+                driver, ADDRESS, kind="address"
+            )
+
+        self.assertIs(result, True)
+        close_mock.assert_not_called()
+
     def test_missing_search_dialog_transition_returns_false(self):
         """A successful click is insufficient when the next modal never opens."""
         driver = object()
