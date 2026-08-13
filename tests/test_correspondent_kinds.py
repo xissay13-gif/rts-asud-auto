@@ -21,14 +21,15 @@ class CorrespondentKindTests(unittest.TestCase):
             ("Тепловая Компания", "-", "-"),
         )
 
-    def test_address_card_puts_full_address_in_surname_only(self):
-        self.assertEqual(
-            correspondent_card_parts(
-                "644021, г. Омск, ул. 4-я Транспортная 15 кв 8",
-                "address",
-            ),
-            ("644021, г. Омск, ул. 4-я Транспортная 15 кв 8", "", ""),
-        )
+    def test_feedback_address_card_puts_address_in_surname_and_dashes(self):
+        address = "644021, г. Омск, ул. 4-я Транспортная 15 кв 8"
+
+        for kind in ("address", "feedback-address", "feedback_address"):
+            with self.subTest(kind=kind):
+                self.assertEqual(
+                    correspondent_card_parts(address, kind),
+                    (address, "-", "-"),
+                )
 
     def test_legal_match_requires_full_name(self):
         self.assertTrue(match_legal_correspondent(

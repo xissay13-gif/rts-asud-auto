@@ -359,8 +359,8 @@ class CorrespondentCreationFlowTests(unittest.TestCase):
             driver.field_writes,
             [
                 ("outer_person_dialog-last_name-input", ADDRESS),
-                ("outer_person_dialog-first_name-input", ""),
-                ("outer_person_dialog-middle_name-input", ""),
+                ("outer_person_dialog-first_name-input", "-"),
+                ("outer_person_dialog-middle_name-input", "-"),
                 ("outer_person_dialog-position-input", "ФЛ"),
             ],
         )

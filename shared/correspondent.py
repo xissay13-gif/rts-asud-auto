@@ -183,7 +183,9 @@ def correspondent_card_parts(name, kind="person"):
     if not value:
         return "", "", ""
     if _is_address_kind(kind):
-        return value, "", ""
+        # В карточке физлица АСУД Имя и Отчество обязательны даже для
+        # корреспондента-адреса. Пустые значения не проходят сохранение.
+        return value, "-", "-"
     if _is_legal_kind(kind):
         return value, "-", "-"
     parts = value.split()

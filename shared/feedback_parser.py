@@ -116,7 +116,7 @@ def parse_feedback_body(body, subject=None):
         correspondent_kind = 'person'
     elif address:
         # Новый шаблон feedback не передаёт ФИО. Для таких писем адрес
-        # становится значением поля «Фамилия», а Имя/Отчество не заполняются.
+        # становится «Фамилией», а обязательные Имя/Отчество получают прочерки.
         correspondent = address
         correspondent_kind = 'address'
     else:
