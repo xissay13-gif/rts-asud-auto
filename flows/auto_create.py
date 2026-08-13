@@ -11,12 +11,17 @@ auto_create_correspondent.py — Пакетное создание Входящ�
   attachments.py  — прикрепление файлов (пустышка)
 """
 
+import json
+import hashlib
+import math
 import os
 import re
 import sys
 import time
 import logging
+import unicodedata
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import openpyxl
 from selenium import webdriver
@@ -37,6 +42,7 @@ from shared.ui import (click, wait_and_click, find_input_near_label,
 from shared.correspondent import fill_correspondent_field, match_correspondent
 from shared.attachments import get_dummy_msg, attach_content
 from shared.xlsx_format import format_registry_before_save
+from shared.registration import run_registration
 
 
 # ================= LOGGING =================
@@ -47,6 +53,144 @@ logging.basicConfig(
 )
 log = logging.getLogger("asud")
 start_time = time.monotonic()
+
+
+# ================= REGISTRATION STATE =================
+
+STATE_SUFFIX = ".asud_auto_create_state.json"
+TERMINAL_REGISTRATION_STATUSES = frozenset({
+    "OK",
+    "DUPLICATE",
+    "REGISTERED_ONLY",
+    "SUBMISSION_UNKNOWN",
+    # Write-ahead marker. If the process is killed after the click, there is no
+    # safe way to distinguish an accepted request from a no-op on restart.
+    "SUBMISSION_PENDING",
+})
+REGISTRATION_STATUSES = TERMINAL_REGISTRATION_STATUSES | {"RETRYABLE"}
+
+
+def _registration_state_path(excel_path):
+    """Sidecar рядом с исходным Excel, привязанный к его имени."""
+    source = Path(excel_path).resolve()
+    return source.with_name(source.stem + STATE_SUFFIX)
+
+
+def load_registration_state(excel_path):
+    """Читает sidecar; повреждённый файл блокирует небезопасный повтор."""
+    path = _registration_state_path(excel_path)
+    if not path.is_file():
+        return {"version": 1, "documents": {}}
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict) or not isinstance(
+                state.get("documents"), dict):
+            raise ValueError("поле documents отсутствует или имеет неверный тип")
+        state.setdefault("version", 1)
+        return state
+    except Exception as exc:
+        raise RuntimeError(
+            f"Не удалось прочитать state {path}: {exc}. "
+            "Автоповтор заблокирован во избежание дубля."
+        ) from exc
+
+
+def save_registration_state(excel_path, state):
+    """Атомарно сохраняет sidecar через temp-файл в той же папке."""
+    path = _registration_state_path(excel_path)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as stream:
+            json.dump(state, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def _document_state(state, doc_data):
+    source_key = doc_data.get("_source_key")
+    if not source_key:
+        return None
+    return state.get("documents", {}).get(source_key)
+
+
+def _document_is_terminal(state, doc_data):
+    entry = _document_state(state, doc_data) or {}
+    return entry.get("status") in TERMINAL_REGISTRATION_STATUSES
+
+
+def _record_document_state(excel_path, state, doc_data, status, *,
+                           asud_id=None, error=""):
+    if status not in REGISTRATION_STATUSES:
+        raise ValueError(f"Неизвестный registration status: {status}")
+    source_key = doc_data.get("_source_key")
+    source_row = doc_data.get("_source_row")
+    if not source_key or not isinstance(source_row, int):
+        raise ValueError("У документа отсутствуют _source_key/_source_row")
+    documents = state.setdefault("documents", {})
+    documents[source_key] = {
+        "source_key": source_key,
+        "source_row": source_row,
+        "status": status,
+        "asud_id": str(asud_id or ""),
+        "error": str(error or "")[:500],
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    save_registration_state(excel_path, state)
+
+
+def _registration_status(outcome):
+    """Переводит outcome в безопасный persisted status.
+
+    ``RETRYABLE`` означает, что state machine доказал отсутствие отправленного
+    клика. Во всех неопределённых случаях write-ahead marker остаётся
+    терминальным, чтобы перезапуск не создал дубль.
+    """
+    if outcome.registered and outcome.resolved:
+        return "OK"
+    if outcome.registered:
+        return "REGISTERED_ONLY"
+    if getattr(outcome, "submission_uncertain", False):
+        return "SUBMISSION_UNKNOWN"
+    return "RETRYABLE"
+
+
+def _normalised_raw_row(row):
+    """Каноническое представление полной Excel-строки для source key."""
+    cells = []
+    for value in row:
+        if value is None:
+            cells.append(["null", None])
+        elif isinstance(value, bool):
+            cells.append(["bool", value])
+        elif isinstance(value, datetime):
+            cells.append(["datetime", value.isoformat(timespec="microseconds")])
+        elif isinstance(value, date):
+            cells.append(["date", value.isoformat()])
+        elif isinstance(value, int):
+            cells.append(["number", str(value)])
+        elif isinstance(value, float):
+            numeric = format(value, ".15g") if math.isfinite(value) else repr(value)
+            cells.append(["number", numeric])
+        else:
+            text = unicodedata.normalize("NFC", str(value))
+            text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+            cells.append(["text", text])
+    return json.dumps(cells, ensure_ascii=False, separators=(",", ":"))
+
+
+def _source_key_for_raw_row(row, identical_counts):
+    canonical = _normalised_raw_row(row)
+    ordinal = identical_counts.get(canonical, 0) + 1
+    identical_counts[canonical] = ordinal
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"row-sha256:{digest}:{ordinal}"
 
 
 # ================= EXCEL =================
@@ -92,7 +236,10 @@ def load_excel(file_path):
              f"ao={idx_ao}, исполнитель={idx_executor}, тема={idx_type}")
 
     rows = []
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True):
+    identical_counts = {}
+    for source_row, row in enumerate(
+            ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True), 2):
+        source_key = _source_key_for_raw_row(row, identical_counts)
         if not row:
             continue
         content = row[idx_content] if len(row) > idx_content else None
@@ -102,6 +249,8 @@ def load_excel(file_path):
         item = {
             "содержание": str(content).strip(),
             "корреспондент": str(corr).strip(),
+            "_source_row": source_row,
+            "_source_key": source_key,
         }
         if idx_ao is not None and len(row) > idx_ao and row[idx_ao]:
             item["ao"] = str(row[idx_ao]).strip()
@@ -390,7 +539,7 @@ def _post_register_check(driver, timeout=5):
     return None
 
 
-def register_and_resolve(driver, index, total):
+def _legacy_register_and_resolve(driver, index, total):
     """Регистрирует + На резолюцию + Да; возвращает (registered, asud_id)."""
     log.info("Регистрирую...")
     registered = False
@@ -547,10 +696,41 @@ def register_and_resolve(driver, index, total):
     return True, asud_id
 
 
+def register_and_resolve(driver, index, total, *, before_register=None):
+    """Общая проверяемая регистрация; возвращает подробный outcome.
+
+    ``before_register`` — write-ahead barrier: если sidecar не удалось
+    сохранить, вызов ``run_registration`` (и возможный клик) не выполняется.
+    """
+    if before_register is not None:
+        before_register()
+    outcome = run_registration(
+        driver,
+        timeout=max(20, cfg.DEFAULTS["timeout"]),
+        retry_grace=2.5,
+        capture_id=lambda current_driver: capture_asud_id(
+            current_driver, timeout=1.5),
+        logger=log,
+    )
+    if not outcome.registered:
+        log.error(
+            f"Документ {index}/{total}: регистрация не подтверждена: "
+            f"{outcome.reason}"
+        )
+    elif not outcome.resolved:
+        log.error(
+            f"Документ {index}/{total}: зарегистрирован, но отправка "
+            f"на резолюцию не подтверждена: {outcome.reason}"
+        )
+    else:
+        log.info(f"Документ {index}/{total} НА РЕЗОЛЮЦИИ")
+    return outcome
+
+
 # ================= DOCUMENT FLOW =================
 
-def create_one_document(driver, doc_data, index, total):
-    """Создаёт один входящий документ."""
+def create_one_document(driver, doc_data, index, total, *, before_register=None):
+    """Создаёт один входящий документ; возвращает ``(status, asud_id)``."""
     log.info(f"{'='*50}")
     log.info(f"ДОКУМЕНТ {index}/{total}")
     log.info(f"Содержание: {doc_data['содержание'][:60]}...")
@@ -613,7 +793,7 @@ def create_one_document(driver, doc_data, index, total):
                 wait_asud_loaded(driver)
             except Exception:
                 pass
-            return None
+            return "DUPLICATE", None
         # Ждём появления "Зарегистрировать" — признак что save прошёл
         WebDriverWait(driver, cfg.DEFAULTS["timeout"]).until(
             EC.presence_of_element_located((By.CSS_SELECTOR,
@@ -632,9 +812,14 @@ def create_one_document(driver, doc_data, index, total):
         else:
             log.warning(f"Документ {index}/{total}: вложение НЕ прикреплено ✗")
 
-    registered, asud_id = register_and_resolve(driver, index, total)
-    if not registered:
-        raise RuntimeError("Регистрация документа не подтверждена")
+    outcome = register_and_resolve(
+        driver, index, total, before_register=before_register)
+    status = _registration_status(outcome)
+    asud_id = outcome.asud_id
+    if status != "OK":
+        # Карточку не продолжаем трогать: main сохранит terminal status и
+        # вернётся на главный экран. Повторная регистрация запрещена sidecar'ом.
+        return status, asud_id
 
     # Ждём что появится первым: либо главный экран (карточка авто-закрылась),
     # либо close-btn (карточка ещё открыта). До 10s, но обычно <1s.
@@ -675,7 +860,7 @@ def create_one_document(driver, doc_data, index, total):
         # Не нашли ни одной из кнопок — перезагружаемся
         driver.get(settings.get("asud_url", cfg.DEFAULTS["asud_url"]))
         wait_asud_loaded(driver)
-    return asud_id
+    return status, asud_id
 
 
 # ================= OUTPUT XLSX (для clean-resolutions) =================
@@ -805,6 +990,13 @@ def main():
     for doc in docs:
         doc["файл"] = msg_path
 
+    try:
+        registration_state = load_registration_state(excel_path)
+    except RuntimeError as exc:
+        log.error(str(exc))
+        input("Enter...")
+        return
+
     if not docs:
         log.error("Нет данных!")
         input("Enter...")
@@ -845,15 +1037,78 @@ def main():
         _ensure_output_xlsx(output_path)
         log.info(f"Output xlsx: {output_path}")
 
-        done_count, err_count = 0, 0
+        done_count, err_count, skipped_count = 0, 0, 0
         for i, doc in enumerate(docs, 1):
+            previous = _document_state(registration_state, doc) or {}
+            if _document_is_terminal(registration_state, doc):
+                skipped_count += 1
+                log.warning(
+                    f"Документ {i}/{len(docs)} пропущен по state: "
+                    f"{previous.get('status')} "
+                    f"(строка {doc.get('_source_row')})"
+                )
+                continue
+
+            def _write_ahead(current_doc=doc):
+                _record_document_state(
+                    excel_path,
+                    registration_state,
+                    current_doc,
+                    "SUBMISSION_PENDING",
+                )
+
             try:
-                asud_id = create_one_document(driver, doc, i, len(docs))
-                _append_output_row(output_path, doc, asud_id)
-                done_count += 1
+                status, asud_id = create_one_document(
+                    driver,
+                    doc,
+                    i,
+                    len(docs),
+                    before_register=_write_ahead,
+                )
+                _record_document_state(
+                    excel_path,
+                    registration_state,
+                    doc,
+                    status,
+                    asud_id=asud_id,
+                )
+                if status in {"OK", "DUPLICATE"}:
+                    _append_output_row(output_path, doc, asud_id)
+                    done_count += 1
+                elif status == "RETRYABLE":
+                    err_count += 1
+                    log.warning(
+                        f"Документ {i}: клик регистрации точно не отправлен; "
+                        "на следующем запуске строку можно повторить"
+                    )
+                    driver.get(url)
+                    wait_asud_loaded(driver)
+                else:
+                    err_count += 1
+                    log.error(
+                        f"Документ {i}: terminal status {status}; "
+                        "автоматический повтор запрещён, нужна ручная проверка"
+                    )
+                    driver.get(url)
+                    wait_asud_loaded(driver)
             except Exception as e:
                 log.error(f"ОШИБКА документ {i}: {e}")
                 err_count += 1
+                current = _document_state(registration_state, doc) or {}
+                if current.get("status") == "SUBMISSION_PENDING":
+                    try:
+                        _record_document_state(
+                            excel_path,
+                            registration_state,
+                            doc,
+                            "SUBMISSION_UNKNOWN",
+                            asud_id=current.get("asud_id"),
+                            error=e,
+                        )
+                    except Exception as state_exc:
+                        # На диске остаётся предыдущий атомарно записанный
+                        # SUBMISSION_PENDING, поэтому перезапуск всё равно safe.
+                        log.error(f"Не удалось обновить sidecar: {state_exc}")
                 driver.get(url)
                 wait_asud_loaded(driver)
 
@@ -866,6 +1121,7 @@ def main():
             "=" * 60,
             f"ГОТОВО!",
             f"  Обработано: {done_count} / {len(docs)}",
+            f"  Пропущено:  {skipped_count}",
             f"  Ошибок:     {err_count}",
             f"  Затрачено:  {elapsed}" + (f"  (в среднем {avg}/док)" if avg else ""),
             "=" * 60,

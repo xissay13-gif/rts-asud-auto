@@ -40,6 +40,10 @@ log = logging.getLogger("asud")
 STATE_NAME = ".asud_sbis_state.json"
 DOWNLOAD_MANIFEST_NAME = ".manifest.json"
 DONE_STATUSES = {"OK", "DUPLICATE"}
+# Уже зарегистрированный документ нельзя автоматически создавать повторно,
+# даже если отправка на резолюцию потребовала ручной проверки.
+MANUAL_STATUSES = {"REGISTERED_ONLY", "SUBMISSION_UNKNOWN"}
+TERMINAL_STATUSES = DONE_STATUSES | MANUAL_STATUSES
 DEFAULT_EXTENSIONS = {
     ".pdf", ".doc", ".docx", ".rtf", ".txt",
     ".xls", ".xlsx", ".xml", ".zip",
@@ -307,8 +311,17 @@ def prepare_items(root, files, state, surname_override="",
         surname = _first_surname_token(correspondent)
         content = content_from_file(path, include_extension)
         signature = _file_signature(path)
-        already_done = (entry.get("status") in DONE_STATUSES
-                        and (bool(sbis_id) or entry.get("signature") == signature))
+        saved_status = entry.get("status")
+        # Ручные/неопределённые исходы никогда не запускаем автоматически
+        # снова даже если файл был перезаписан: первый клик мог создать
+        # документ. Повтор разрешается только явным сбросом state.
+        already_done = (
+            saved_status in MANUAL_STATUSES
+            or (
+                saved_status in DONE_STATUSES
+                and (bool(sbis_id) or entry.get("signature") == signature)
+            )
+        )
         legacy_type_index = int(doc_type_index)
         if correspondent_type == "person":
             item_type_index = int(person_doc_type_index)
@@ -514,10 +527,40 @@ def main():
         total = len(pending)
         for position, item in enumerate(pending, 1):
             entry = state["files"][item["key"]]
+            asud_id = None
             try:
                 asud_id = mix_flow.create_one_document(
                     driver, item["doc_data"], position, total)
                 status = mix_flow._last_result.get("status", "FAILED")
+                if status in MANUAL_STATUSES:
+                    error_count += 1
+                    reason = (
+                        "Документ зарегистрирован, но резолюция не подтверждена"
+                        if status == "REGISTERED_ONLY" else
+                        "Результат регистрации в АСУД не определён"
+                    )
+                    entry.update({
+                        "signature": item["signature"],
+                        "status": status,
+                        "surname": item["surname"],
+                        "correspondent": item["correspondent"],
+                        "correspondent_type": item["correspondent_type"],
+                        "content": item["content"],
+                        "sbis_id": item["sbis_id"],
+                        "source_path": item["display_key"],
+                        "asud_id": asud_id or "",
+                        "last_error": reason,
+                    })
+                    save_state(root, state)
+                    mix_flow._append_output_row(
+                        output_path, item["doc_data"], asud_id,
+                        status=status,
+                    )
+                    log.error(
+                        f"РУЧНАЯ ПРОВЕРКА файл {item['display_key']}: {reason}; "
+                        "автоматический повтор запрещён"
+                    )
+                    continue
                 if status not in DONE_STATUSES:
                     raise RuntimeError(f"регистрация завершилась со статусом {status}")
                 if status == "DUPLICATE":
@@ -542,9 +585,32 @@ def main():
                     output_path, item["doc_data"], asud_id, status=status)
             except Exception as exc:
                 error_count += 1
-                entry["status"] = "FAILED"
-                entry["last_error"] = str(exc)[:500]
+                flow_status = mix_flow._last_result.get("status", "FAILED")
+                if flow_status in MANUAL_STATUSES:
+                    # Даже если recovery/закрытие карточки упало уже после
+                    # terminal-исхода, сохраняем полный ключ и signature. Иначе
+                    # файл без sbis_id снова попадёт в pending после рестарта.
+                    entry.update({
+                        "signature": item["signature"],
+                        "status": flow_status,
+                        "surname": item["surname"],
+                        "correspondent": item["correspondent"],
+                        "correspondent_type": item["correspondent_type"],
+                        "content": item["content"],
+                        "sbis_id": item["sbis_id"],
+                        "source_path": item["display_key"],
+                        "asud_id": asud_id or "",
+                        "last_error": str(exc)[:500],
+                    })
+                else:
+                    entry["status"] = "FAILED"
+                    entry["last_error"] = str(exc)[:500]
                 save_state(root, state)
+                if flow_status in MANUAL_STATUSES:
+                    mix_flow._append_output_row(
+                        output_path, item["doc_data"], asud_id,
+                        status=flow_status,
+                    )
                 log.error(f"ОШИБКА файл {item['display_key']}: {exc}")
                 try:
                     driver.get(url)

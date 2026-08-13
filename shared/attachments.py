@@ -222,19 +222,23 @@ def move_to_errors(file_path, base_dir, reason="", err_dirname="Ошибки"):
     Папка создаётся если нет. Конфликт имён → суффикс _HHMMSS.
     Ничего не делает если file_path пустой/не существует.
     """
-    if not file_path or not os.path.isfile(file_path):
-        return
+    if not file_path:
+        return False
+    if not os.path.isfile(file_path):
+        # Источник уже исчез (например, его успел переместить другой процесс).
+        # Для вызывающего это безопасный terminal-исход: повторять нечего.
+        return not os.path.exists(file_path)
     if not base_dir or not os.path.isdir(base_dir):
         log.warning(f"base_dir '{base_dir}' не существует — "
                     f"не перемещаю {os.path.basename(file_path)}")
-        return
+        return False
 
     err_dir = os.path.join(base_dir, err_dirname)
     try:
         os.makedirs(err_dir, exist_ok=True)
     except Exception as e:
         log.warning(f"Не удалось создать {err_dir}: {e}")
-        return
+        return False
 
     name = os.path.basename(file_path)
     dest = os.path.join(err_dir, name)
@@ -254,8 +258,10 @@ def move_to_errors(file_path, base_dir, reason="", err_dirname="Ошибки"):
                     f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{reason}\n")
             except Exception as e:
                 log.debug(f"sidecar не записан: {e}")
+        return not os.path.exists(file_path) and os.path.isfile(dest)
     except Exception as e:
         log.warning(f"Не удалось переместить {name} в Ошибки: {e}")
+        return False
 
 
 _DIAG_BUTTONS_JS = r"""

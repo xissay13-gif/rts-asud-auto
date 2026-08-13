@@ -47,6 +47,7 @@ from shared.correspondent import (fill_correspondent_field, match_strict, fio_to
                            extract_fio_from_text)
 from shared.attachments import find_msg_by_link, get_dummy_msg, attach_content, move_to_done
 from shared.xlsx_format import format_registry_before_save
+from shared.registration import run_registration
 
 
 # ================= LOGGING =================
@@ -188,6 +189,8 @@ def _append_output_row(path, doc_data, asud_id, status="OK"):
       OK        → «Зарегистрирован DD.MM.YYYY HH:MM»
       DRAFT     → «Черновик DD.MM.YYYY HH:MM»
       DUPLICATE → «Дубликат DD.MM.YYYY HH:MM»
+      REGISTERED_ONLY → «Зарегистрирован без резолюции ...»
+      SUBMISSION_UNKNOWN → «Результат регистрации не определён ...»
     """
     # Округ — пытаемся определить автоматически из TextBody
     okrug = None
@@ -210,6 +213,8 @@ def _append_output_row(path, doc_data, asud_id, status="OK"):
         "OK":        f"Зарегистрирован {ts}",
         "DRAFT":     f"Черновик {ts}",
         "DUPLICATE": f"Дубликат {ts}",
+        "REGISTERED_ONLY": f"Зарегистрирован без резолюции {ts}",
+        "SUBMISSION_UNKNOWN": f"Результат регистрации не определён {ts}",
     }.get(status, f"{status} {ts}")
     try:
         from shared.xlsx_lock import xlsx_lock
@@ -783,7 +788,7 @@ def _post_register_check(driver, timeout=5):
     return None
 
 
-def register_and_resolve(driver, index, total):
+def _legacy_register_and_resolve(driver, index, total):
     """Регистрирует + На резолюцию + Да.
 
     Возвращает пару ``(registered, asud_id)``. Номер может не захватиться даже
@@ -962,6 +967,41 @@ def register_and_resolve(driver, index, total):
     return True, asud_id
 
 
+def register_and_resolve(driver, index, total):
+    """Регистрация по подтверждаемым переходам UI.
+
+    Возвращает ``(registered, resolved, asud_id, submission_uncertain)``.
+    Последний флаг означает: событие могло уйти в АСУД, но переход интерфейса
+    не подтвердился. Такой документ нельзя автоматически регистрировать снова.
+    """
+    outcome = run_registration(
+        driver,
+        timeout=max(20, cfg.DEFAULTS["timeout"]),
+        retry_grace=2.5,
+        capture_id=lambda current_driver: capture_asud_id(
+            current_driver, timeout=1.5),
+        logger=log,
+    )
+    if not outcome.registered:
+        log.error(
+            f"Документ {index}/{total}: регистрация не подтверждена: "
+            f"{outcome.reason}"
+        )
+    elif not outcome.resolved:
+        log.error(
+            f"Документ {index}/{total}: зарегистрирован, но отправка "
+            f"на резолюцию не подтверждена: {outcome.reason}"
+        )
+    else:
+        log.info(f"Документ {index}/{total} НА РЕЗОЛЮЦИИ")
+    return (
+        outcome.registered,
+        outcome.resolved,
+        outcome.asud_id,
+        outcome.submission_uncertain,
+    )
+
+
 def close_card_and_wait_main(driver):
     """Закрывает карточку и ждёт главную страницу.
 
@@ -1031,7 +1071,8 @@ def close_card_and_wait_main(driver):
 
 # Статус последнего create_one_document — читают вызывающие (email-flow и т.п.),
 # чтобы решить куда переместить .msg (Завершено / Ошибки / оставить).
-# Значения: 'OK' | 'DUPLICATE' | 'DRAFT' | 'FAILED'.
+# Значения: 'OK' | 'DUPLICATE' | 'DRAFT' | 'REGISTERED_ONLY' |
+# 'SUBMISSION_UNKNOWN' | 'FAILED'.
 # 'FAILED' — дефолт; перетирается в успешных путях.
 _last_result = {"status": "UNKNOWN"}
 
@@ -1157,15 +1198,38 @@ def create_one_document(driver, doc_data, index, total):
     # [7/7] Регистрация (если ФИО найдено) или черновик
     asud_id = None
     if doc_data["корр_найден"]:
-        registered, asud_id = register_and_resolve(driver, index, total)
+        registered, resolved, asud_id, submission_uncertain = (
+            register_and_resolve(driver, index, total)
+        )
         # После успешной регистрации — реальный (не dummy) .msg → Завершено/
         # Черновики НЕ переносим: файл нужен для ручной доработки.
-        if registered and attach_path and attach_path != dummy_path:
+        if registered and resolved and attach_path and attach_path != dummy_path:
             move_to_done(attach_path, outlook_dir)
-        _last_result["status"] = "OK" if registered else "FAILED"
+        if submission_uncertain:
+            _last_result["status"] = "SUBMISSION_UNKNOWN"
+        elif registered and resolved:
+            _last_result["status"] = "OK"
+        elif registered:
+            _last_result["status"] = "REGISTERED_ONLY"
+        else:
+            _last_result["status"] = "FAILED"
+        if submission_uncertain:
+            close_card_and_wait_main(driver)
+            log.error(
+                "АСУД мог принять регистрацию, но переход не подтверждён; "
+                "автоматически повторять этот документ нельзя"
+            )
+            return asud_id
         if not registered:
             close_card_and_wait_main(driver)
             raise RuntimeError("Регистрация документа не подтверждена")
+        if not resolved:
+            close_card_and_wait_main(driver)
+            log.error(
+                "Документ уже зарегистрирован, но резолюция не подтверждена; "
+                "автоматически повторять регистрацию нельзя"
+            )
+            return asud_id
     else:
         log.warning(f"Row {doc_data['row_idx']}: ФИО НЕ найдено — "
                     f"оставляю в ЧЕРНОВИКАХ для ручной доработки "
@@ -1331,6 +1395,24 @@ def main():
         for i, doc in enumerate(docs, 1):
             try:
                 asud_id = create_one_document(driver, doc, i, len(docs))
+                flow_status = _last_result.get("status", "FAILED")
+                if flow_status in {"REGISTERED_ONLY", "SUBMISSION_UNKNOWN"}:
+                    # Терминальный ручной исход: ссылка фиксируется, чтобы
+                    # повторный запуск не создавал дубль документа.
+                    key = _link_key(doc.get("link"))
+                    if key:
+                        processed.add(key)
+                        save_state(excel_path, processed)
+                    _append_output_row(
+                        output_path, doc, asud_id,
+                        status=flow_status,
+                    )
+                    log.error(
+                        f"Документ {i}: {flow_status} — требуется ручная "
+                        "проверка; автоматический повтор запрещён"
+                    )
+                    err_count += 1
+                    continue
                 # Помечаем как обработанный сразу после успеха (до следующей итерации)
                 key = _link_key(doc.get("link"))
                 if key:

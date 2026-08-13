@@ -12,6 +12,7 @@ flows/email.py — Email-direct: создание Входящих докуме�
 """
 
 import os
+import json
 import re
 import signal
 import sys
@@ -318,12 +319,16 @@ def _append_dated_row(path, doc, asud_id, status="OK"):
       OK        → «Зарегистрирован DD.MM.YYYY HH:MM»
       DRAFT     → «Черновик DD.MM.YYYY HH:MM»
       DUPLICATE → «Дубликат DD.MM.YYYY HH:MM»
+      REGISTERED_ONLY → «Зарегистрирован без резолюции ...»
+      SUBMISSION_UNKNOWN → «Результат регистрации не определён ...»
     """
     ts = datetime.now().strftime("%d.%m.%Y %H:%M")
     status_text = {
         "OK":        f"Зарегистрирован {ts}",
         "DRAFT":     f"Черновик {ts}",
         "DUPLICATE": f"Дубликат {ts}",
+        "REGISTERED_ONLY": f"Зарегистрирован без резолюции {ts}",
+        "SUBMISSION_UNKNOWN": f"Результат регистрации не определён {ts}",
     }.get(status, f"{status} {ts}")
 
     # Знакомые колонки → значения. ЛЮБОЕ имя колонки в шапке xlsx, которое
@@ -365,12 +370,62 @@ def _list_root_msgs(folder_path):
         out = []
         for f in os.listdir(folder_path):
             full = os.path.join(folder_path, f)
-            if os.path.isfile(full) and f.lower().endswith('.msg'):
+            terminal_marker = full + ".asud_terminal.json"
+            if (os.path.isfile(full) and f.lower().endswith('.msg')
+                    and not os.path.isfile(terminal_marker)):
                 out.append(full)
         return sorted(out)
     except OSError as e:
         log.error(f"Не могу прочитать папку {folder_path}: {e}")
         return []
+
+
+def _quarantine_terminal_msg(msg_path, folder, status, reason):
+    """Не даёт письму с неопределённой регистрацией попасть в очередь снова.
+
+    Маркер пишется атомарно *до* перемещения. Если UNC/антивирус держит MSG и
+    ``Ошибки/`` временно недоступна, корневой сканер всё равно пропустит файл.
+    При успешном перемещении маркер больше не нужен и удаляется.
+    """
+    marker = str(msg_path) + ".asud_terminal.json"
+    tmp = marker + ".tmp"
+    marker_written = False
+    payload = {
+        "version": 1,
+        "status": str(status),
+        "reason": str(reason),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        with open(tmp, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, marker)
+        marker_written = True
+    except Exception as exc:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        log.error(f"Не удалось записать terminal-маркер для {msg_path}: {exc}")
+
+    moved = bool(move_to_errors(msg_path, folder, reason))
+    if moved:
+        try:
+            if os.path.exists(marker):
+                os.remove(marker)
+        except Exception as exc:
+            # MSG уже вне корня, оставшийся marker безвреден.
+            log.debug(f"Terminal-маркер не удалён: {exc}")
+        return True
+    if marker_written:
+        log.critical(
+            f"MSG не перемещён, но исключён из очереди marker-файлом: {marker}"
+        )
+        return True
+    return False
 
 
 def _parse_one_msg(msg_path, process_mode="mix"):
@@ -596,7 +651,8 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
     output_suffix — суффикс в имени per-date xlsx (для разделения реестров
     при параллельных запусках двух пресетов).
 
-    Возвращает финальный статус: 'OK' | 'DUPLICATE' | 'DRAFT' | 'FAILED'.
+    Возвращает финальный статус: 'OK' | 'DUPLICATE' | 'DRAFT' |
+    'REGISTERED_ONLY' | 'SUBMISSION_UNKNOWN' | 'FAILED'.
     in_daemon=True (mix-режим): DRAFT → перенос в Черновики/.
     """
     msg_path = doc.get("файл")
@@ -634,6 +690,18 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
             log.info(f"Документ {index}: ФИО не найдено — .msg в Черновики/")
             move_to_drafts(msg_path, folder)
         # one-shot mix: оставляем в корне как и было
+    elif status in {"REGISTERED_ONLY", "SUBMISSION_UNKNOWN"}:
+        # После отправленного события регистрацию нельзя безопасно повторять:
+        # документ либо уже существует, либо результат ответа АСУД неизвестен.
+        written_xlsx = _xlsx_path(base_dir, output_suffix, target_folder=folder)
+        _ensure_dated_xlsx(written_xlsx)
+        _append_dated_row(
+            written_xlsx, doc, asud_id or "", status=status
+        )
+        log.error(
+            f"Документ {index}: {status} — требуется ручная проверка; "
+            "автоматический повтор запрещён"
+        )
     else:  # FAILED — caller сам решает что делать (retry / move-to-errors)
         pass
 
@@ -759,6 +827,23 @@ def main():
                     dup_count += 1
                 elif status == "DRAFT":
                     draft_count += 1
+                elif status in {"REGISTERED_ONLY", "SUBMISSION_UNKNOWN"}:
+                    reason = (
+                        "Документ зарегистрирован, но резолюция не подтверждена"
+                        if status == "REGISTERED_ONLY" else
+                        "Результат регистрации в АСУД не определён"
+                    ) + "; требуется ручная проверка"
+                    quarantined = _quarantine_terminal_msg(
+                        msg_path, folder, status, reason
+                    )
+                    err_count += 1
+                    if not quarantined:
+                        log.critical(
+                            "Не удалось ни переместить MSG, ни записать "
+                            "terminal-маркер — останавливаю обработку во "
+                            "избежание повторной регистрации"
+                        )
+                        break
                 else:  # FAILED
                     move_to_errors(msg_path, folder,
                                    f"Регистрация не удалась (status={status})")
@@ -966,6 +1051,7 @@ def daemon_main():
         """Обрабатывает все .msg из current_folder. Логика как раньше,
         просто вынесена в функцию чтобы вызываться для каждой папки в
         multi-folder режиме. Использует closure: driver, base_dir и т.д."""
+        global _stop_flag
         queue = _list_root_msgs(current_folder)
         if not queue:
             return 0  # ничего не было
@@ -993,7 +1079,40 @@ def daemon_main():
                                        idx, len(queue), in_daemon=True,
                                        process_mode=process_mode,
                                        output_suffix=current_suffix)
-                if status == "FAILED":
+                if status in {"REGISTERED_ONLY", "SUBMISSION_UNKNOWN"}:
+                    # Повторять такой MSG нельзя: документ уже зарегистрирован,
+                    # иначе следующая итерация создаст дубль вместо доведения
+                    # существующей карточки до резолюции.
+                    reason = (
+                        "Документ зарегистрирован, но резолюция не подтверждена"
+                        if status == "REGISTERED_ONLY" else
+                        "Результат регистрации в АСУД не определён"
+                    ) + "; требуется ручная проверка"
+                    quarantined = _quarantine_terminal_msg(
+                        msg_path, current_folder, status, reason
+                    )
+                    retry_count.pop(retry_key, None)
+                    totals["FAILED"] += 1
+                    _print_doc_line(
+                        idx, len(queue), "FAILED",
+                        ("зарегистрирован без подтверждённой резолюции"
+                         if status == "REGISTERED_ONLY" else
+                         "результат регистрации не определён") + " → Ошибки/",
+                    )
+                    if not quarantined:
+                        log.critical(
+                            "Не удалось ни переместить MSG, ни записать "
+                            "terminal-маркер — останавливаю daemon во "
+                            "избежание повторной регистрации"
+                        )
+                        _stop_flag = True
+                        return idx
+                    try:
+                        driver.get(url)
+                        wait_asud_loaded(driver)
+                    except Exception:
+                        pass
+                elif status == "FAILED":
                     retry_count[retry_key] = retry_count.get(retry_key, 0) + 1
                     if retry_count[retry_key] >= max_retries:
                         move_to_errors(msg_path, current_folder,

@@ -406,6 +406,112 @@ class CorrespondentSelectionTests(unittest.TestCase):
         cdp_click_mock.assert_called_once()
         create_mock.assert_not_called()
 
+    def test_cdp_click_does_not_promote_unchanged_exact_query_to_selection(self):
+        """The typed address is still only a query, even after CDP dispatch.
+
+        Address lookup types the full expected value.  If ASUD closes (or we
+        fail to detect) the popup without committing a row, that unchanged
+        input must not be accepted as proof of selection.
+        """
+        option = object()
+        driver = _Driver(parent_option=option)
+        candidate = _Candidate(ADDRESS, css_class="x-boundlist-item")
+        inp = _Input()
+        raw_query_only = {
+            "input_value": ADDRESS,
+            "popup_visible": False,
+            "semantic_values": [],
+            "semantic_value": "",
+        }
+
+        with (
+            patch.object(correspondent.time, "sleep", return_value=None),
+            patch.object(correspondent, "WebDriverWait", _ImmediateWait),
+            patch.object(
+                correspondent, "find_input_near_label", return_value=inp
+            ),
+            patch.object(correspondent, "js_type_combobox"),
+            patch.object(
+                correspondent, "find_dropdown_options",
+                return_value=[candidate],
+            ),
+            patch.object(
+                correspondent, "_correspondent_field_state",
+                return_value=raw_query_only,
+            ),
+            patch.object(
+                correspondent, "_clear_query_before_option_click",
+                return_value=False,
+            ),
+            patch.object(
+                correspondent, "cdp_click", return_value=True
+            ) as cdp_click_mock,
+            patch.object(
+                correspondent, "create_correspondent", return_value=True
+            ) as create_mock,
+        ):
+            result = correspondent.fill_correspondent_field(
+                driver, ADDRESS, kind="address"
+            )
+
+        self.assertIs(result, False)
+        cdp_click_mock.assert_called_once_with(driver, option)
+        create_mock.assert_not_called()
+
+    def test_cdp_selection_is_accepted_only_after_popup_closes(self):
+        """A committed row under an open popup is not final UI state yet."""
+        option = object()
+        driver = _Driver(parent_option=option)
+        candidate = _Candidate(ADDRESS, css_class="x-boundlist-item")
+        inp = _Input()
+        states = [
+            {
+                "input_value": "",
+                "popup_visible": True,
+                "semantic_values": [ADDRESS],
+                "semantic_value": ADDRESS,
+            },
+            {
+                "input_value": "",
+                "popup_visible": False,
+                "semantic_values": [ADDRESS],
+                "semantic_value": ADDRESS,
+            },
+        ]
+
+        with (
+            patch.object(correspondent.time, "sleep", return_value=None),
+            patch.object(correspondent, "WebDriverWait", _ImmediateWait),
+            patch.object(
+                correspondent, "find_input_near_label", return_value=inp
+            ),
+            patch.object(correspondent, "js_type_combobox"),
+            patch.object(
+                correspondent, "find_dropdown_options",
+                return_value=[candidate],
+            ),
+            patch.object(
+                correspondent, "_correspondent_field_state",
+                side_effect=states,
+            ) as state_mock,
+            patch.object(
+                correspondent, "_clear_query_before_option_click",
+                return_value=True,
+            ),
+            patch.object(
+                correspondent, "cdp_click", return_value=True
+            ) as cdp_click_mock,
+            patch.object(correspondent, "create_correspondent") as create_mock,
+        ):
+            result = correspondent.fill_correspondent_field(
+                driver, ADDRESS, kind="address"
+            )
+
+        self.assertIs(result, True)
+        self.assertEqual(state_mock.call_count, 2)
+        cdp_click_mock.assert_called_once_with(driver, option)
+        create_mock.assert_not_called()
+
     def test_stale_nonempty_options_never_trigger_duplicate_creation(self):
         driver = _Driver(parent_option=None)
         candidates = DropdownOptions(

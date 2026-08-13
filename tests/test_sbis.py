@@ -2,7 +2,9 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from unittest.mock import patch
 
+from flows import sbis as sbis_flow
 from flows.sbis import (
     content_from_file,
     derive_surname,
@@ -14,7 +16,163 @@ from flows.sbis import (
 )
 
 
+class _Driver:
+    def __init__(self):
+        self.visited = []
+        self.quit_called = False
+
+    def get(self, url):
+        self.visited.append(url)
+
+    def quit(self):
+        self.quit_called = True
+
+
 class SbisFlowTests(unittest.TestCase):
+    def test_manual_status_survives_exception_after_flow_outcome(self):
+        old_result = sbis_flow.mix_flow._last_result
+        old_settings = sbis_flow.mix_flow.settings
+        self.addCleanup(
+            setattr, sbis_flow.mix_flow, "_last_result", old_result
+        )
+        self.addCleanup(
+            setattr, sbis_flow.mix_flow, "settings", old_settings
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "[ФЛ][Иванов Иван Иванович] Обращение.pdf"
+            source.write_bytes(b"pdf")
+            (root / "msedgedriver.exe").touch()
+            driver = _Driver()
+            sbis_flow.mix_flow._last_result = {"status": "FAILED"}
+
+            def fail_after_uncertain(*_args):
+                sbis_flow.mix_flow._last_result["status"] = "SUBMISSION_UNKNOWN"
+                raise RuntimeError("recovery failed after submit")
+
+            with (
+                patch.dict(sbis_flow.os.environ, {
+                    "ASUD_SBIS_DIR": str(root),
+                }, clear=True),
+                patch.object(sbis_flow.cfg, "load", return_value={
+                    "asud_url": "https://asud.test/",
+                    "sbis": {"input_dir": str(root)},
+                }),
+                patch.object(sbis_flow.cfg, "setup_file_logger"),
+                patch.object(sbis_flow.cfg, "keep_system_awake"),
+                patch.object(sbis_flow.cfg, "get_base_dir", return_value=str(root)),
+                patch.object(sbis_flow.cfg, "build_edge_options", return_value=object()),
+                patch.object(sbis_flow, "input", return_value=""),
+                patch.object(sbis_flow.webdriver, "Edge", return_value=driver),
+                patch.object(sbis_flow, "set_driver_timeout"),
+                patch.object(sbis_flow, "wait_asud_loaded"),
+                patch.object(sbis_flow.mix_flow, "_ensure_output_xlsx"),
+                patch.object(
+                    sbis_flow.mix_flow, "create_one_document",
+                    side_effect=fail_after_uncertain,
+                ),
+                patch.object(sbis_flow.mix_flow, "_append_output_row") as output_mock,
+            ):
+                sbis_flow.main()
+
+            state = sbis_flow.load_state(root)
+            entry = next(iter(state["files"].values()))
+            self.assertEqual(entry["status"], "SUBMISSION_UNKNOWN")
+            self.assertTrue(entry["signature"])
+            self.assertEqual(entry["source_path"], source.name)
+            self.assertTrue(prepare_items(root, [source], state)[0]["already_done"])
+            output_mock.assert_called_once()
+
+    def test_partial_terminal_status_persists_complete_state_and_output(self):
+        old_result = sbis_flow.mix_flow._last_result
+        old_settings = sbis_flow.mix_flow.settings
+        self.addCleanup(
+            setattr, sbis_flow.mix_flow, "_last_result", old_result
+        )
+        self.addCleanup(
+            setattr, sbis_flow.mix_flow, "settings", old_settings
+        )
+
+        for terminal_status, asud_id in (
+            ("REGISTERED_ONLY", "ASUD/1/registered"),
+            ("SUBMISSION_UNKNOWN", ""),
+        ):
+            with self.subTest(status=terminal_status), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "[ФЛ][Иванов Иван Иванович] Обращение.pdf"
+                source.write_bytes(b"pdf")
+                (root / "msedgedriver.exe").touch()
+                driver = _Driver()
+                sbis_flow.mix_flow._last_result = {"status": "FAILED"}
+
+                def create_partial(_driver, _doc, _position, _total):
+                    sbis_flow.mix_flow._last_result["status"] = terminal_status
+                    return asud_id
+
+                settings = {
+                    "asud_url": "https://asud.test/",
+                    "sbis": {"input_dir": str(root)},
+                }
+
+                with (
+                    patch.dict(
+                        sbis_flow.os.environ,
+                        {"ASUD_SBIS_DIR": str(root)},
+                        clear=True,
+                    ),
+                    patch.object(sbis_flow.cfg, "load", return_value=settings),
+                    patch.object(sbis_flow.cfg, "setup_file_logger"),
+                    patch.object(sbis_flow.cfg, "keep_system_awake"),
+                    patch.object(
+                        sbis_flow.cfg, "get_base_dir", return_value=str(root)
+                    ),
+                    patch.object(
+                        sbis_flow.cfg, "build_edge_options", return_value=object()
+                    ),
+                    patch.object(sbis_flow, "input", return_value=""),
+                    patch.object(
+                        sbis_flow.webdriver, "Edge", return_value=driver
+                    ),
+                    patch.object(sbis_flow, "set_driver_timeout"),
+                    patch.object(sbis_flow, "wait_asud_loaded"),
+                    patch.object(
+                        sbis_flow.mix_flow, "_ensure_output_xlsx"
+                    ),
+                    patch.object(
+                        sbis_flow.mix_flow, "create_one_document",
+                        side_effect=create_partial,
+                    ) as create_mock,
+                    patch.object(
+                        sbis_flow.mix_flow, "_append_output_row"
+                    ) as output_mock,
+                ):
+                    sbis_flow.main()
+
+                state = sbis_flow.load_state(root)
+                self.assertEqual(len(state["files"]), 1)
+                entry = next(iter(state["files"].values()))
+                self.assertEqual(entry["status"], terminal_status)
+                self.assertTrue(entry["signature"])
+                self.assertEqual(entry["surname"], "Иванов")
+                self.assertEqual(
+                    entry["correspondent"], "Иванов Иван Иванович"
+                )
+                self.assertEqual(entry["correspondent_type"], "person")
+                self.assertEqual(entry["content"], "Обращение")
+                self.assertEqual(entry["source_path"], source.name)
+                self.assertEqual(entry["asud_id"], asud_id)
+                self.assertTrue(entry["last_error"])
+
+                restarted = prepare_items(root, [source], state)[0]
+                self.assertTrue(restarted["already_done"])
+                create_mock.assert_called_once()
+                output_mock.assert_called_once()
+                self.assertEqual(
+                    output_mock.call_args.kwargs["status"], terminal_status
+                )
+                self.assertEqual(output_mock.call_args.args[2], asud_id)
+                self.assertTrue(driver.quit_called)
+
     def test_output_registry_is_created_in_source_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "Корр Вх"
@@ -157,6 +315,41 @@ class SbisFlowTests(unittest.TestCase):
             self.assertEqual(again[0]["number"], 1)
             self.assertTrue(again[0]["already_done"])
             self.assertEqual(again[0]["content"], "Новое имя")
+
+    def test_registered_only_state_is_terminal_for_unchanged_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "[ФЛ][Иванов Иван Иванович] Обращение.pdf"
+            source.write_bytes(b"pdf")
+            state = {"version": 1, "next_number": 1, "files": {}}
+
+            first = prepare_items(root, [source], state)[0]
+            entry = state["files"][first["key"]]
+            entry["status"] = "REGISTERED_ONLY"
+            entry["signature"] = first["signature"]
+
+            restarted = prepare_items(root, [source], state)[0]
+
+            self.assertTrue(restarted["already_done"])
+            self.assertEqual(restarted["number"], first["number"])
+
+    def test_manual_terminal_state_never_retries_after_file_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "[ФЛ][Иванов Иван Иванович] Обращение.pdf"
+            source.write_bytes(b"first")
+            state = {"version": 1, "next_number": 1, "files": {}}
+
+            first = prepare_items(root, [source], state)[0]
+            entry = state["files"][first["key"]]
+            entry["status"] = "SUBMISSION_UNKNOWN"
+            entry["signature"] = first["signature"]
+
+            source.write_bytes(b"rewritten-after-uncertain-submit")
+            restarted = prepare_items(root, [source], state)[0]
+
+            self.assertNotEqual(restarted["signature"], first["signature"])
+            self.assertTrue(restarted["already_done"])
 
     def test_scan_and_stable_numbering(self):
         with tempfile.TemporaryDirectory() as tmp:

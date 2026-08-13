@@ -1351,7 +1351,10 @@ def fill_correspondent_field(driver, person_name, kind="person", *, allow_create
     result_key = None
     result_signature = None
     lookup_completed = False
-    lookup_timeout = 10 if address_only else 5
+    # В живом ТЭС-прогоне справочник один раз оставался loading чуть дольше
+    # прежних 5 секунд. Ждём полный безопасный цикл, но по-прежнему никогда не
+    # создаём запись, пока popup сообщает loading/неизвестное состояние.
+    lookup_timeout = 10 if address_only else 8
     lookup_started = time.monotonic()
 
     def _lookup_ready(d):
