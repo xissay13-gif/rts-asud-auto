@@ -102,40 +102,61 @@ def _norm_keep_space(s):
     return _re.sub(r'\s+', ' ', s).strip().lower()
 
 
+_PERSON_TOKEN_RE = re.compile(r"[A-Za-zА-ЯЁа-яё]+(?:[-'][A-Za-zА-ЯЁа-яё]+)*")
+
+
+def _person_tokens(value):
+    """Токены ФИО без пунктуации; фамилия никогда не ищется подстрокой."""
+    return [
+        token.casefold().replace("ё", "е")
+        for token in _PERSON_TOKEN_RE.findall(str(value or ""))
+    ]
+
+
+def _name_part_matches(actual, expected):
+    if actual == expected:
+        return True
+    # В справочнике имя/отчество могут отображаться полными или инициалами.
+    return bool(actual and expected) and (
+        (len(actual) == 1 and actual == expected[0]) or
+        (len(expected) == 1 and expected == actual[0])
+    )
+
+
+def _contains_person_identity(text, full_name):
+    """Ищет ФИО/инициалы как последовательность целых слов."""
+    expected = _person_tokens(full_name)
+    actual = _person_tokens(text)
+    if not expected or not actual:
+        return False
+    for start, token in enumerate(actual):
+        if token != expected[0]:
+            continue
+        if len(expected) == 1:
+            return True
+        if start + len(expected) > len(actual):
+            continue
+        if all(
+            _name_part_matches(actual[start + offset], expected[offset])
+            for offset in range(1, len(expected))
+        ):
+            return True
+    return False
+
+
 def match_correspondent(text, full_name):
     """Мягкий матч: полное ФИО / инициалы / фамилия. Для адресатов."""
-    text_clean = text.strip()
-    if full_name in text_clean:
+    if _contains_person_identity(text, full_name):
         return True
-    initials = fio_to_initials(full_name)
-    if _norm_keep_space(initials) in _norm_keep_space(text_clean):
-        return True
-    if _norm_no_space(initials) in _norm_no_space(text_clean):
-        return True
-    if _norm_no_space(full_name) in _norm_no_space(text_clean):
-        return True
-    surname = full_name.split()[0]
-    if text_clean.lower().startswith(surname.lower()):
-        return True
-    return False
+    expected = _person_tokens(full_name)
+    actual = _person_tokens(text)
+    return bool(expected and actual and expected[0] == actual[0])
 
 
 def match_strict(text, full_name):
     """Строгий матч: только полное ФИО или инициалы. Для корреспондентов.
-    Нормализует любые пробелы (включая NBSP) и точки/запятые."""
-    text_clean = text.strip()
-    if full_name in text_clean:
-        return True
-    if _norm_keep_space(full_name) in _norm_keep_space(text_clean):
-        return True
-    if _norm_no_space(full_name) in _norm_no_space(text_clean):
-        return True
-    initials = fio_to_initials(full_name)
-    if _norm_keep_space(initials) in _norm_keep_space(text_clean):
-        return True
-    if _norm_no_space(initials) in _norm_no_space(text_clean):
-        return True
-    return False
+    Фамилия сравнивается целым словом: «Гудов» не совпадает с «Огудов»."""
+    return _contains_person_identity(text, full_name)
 
 
 def _is_legal_kind(kind):

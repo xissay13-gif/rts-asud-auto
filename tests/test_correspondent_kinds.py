@@ -2,7 +2,9 @@ import unittest
 
 from shared.correspondent import (
     correspondent_card_parts,
+    match_correspondent,
     match_legal_correspondent,
+    match_strict,
 )
 
 
@@ -33,6 +35,26 @@ class CorrespondentKindTests(unittest.TestCase):
             "Тепловая Компания - -", "Тепловая Компания"))
         self.assertFalse(match_legal_correspondent(
             "Тепловая Сеть - -", "Тепловая Компания"))
+
+    def test_person_match_requires_exact_surname_token(self):
+        expected = "Иванов Иван Иванович"
+
+        self.assertTrue(match_strict("Иванов И И", expected))
+        self.assertTrue(match_strict(
+            "Иванов И И Иванов Иван Иванович / ФЛ", expected))
+        self.assertFalse(match_strict("Сиванов И И", expected))
+        self.assertFalse(match_strict("Переиванов И И", expected))
+
+        # Live regression: ранее нормализованная строка искалась как
+        # подстрока и «Гудов А А» ошибочно совпадал с «Огудов А А».
+        self.assertFalse(match_strict(
+            "Огудов А А", "Гудов Александр Анатольевич"))
+
+    def test_addressee_soft_match_does_not_use_surname_substring(self):
+        expected = "Иванов Иван Иванович"
+
+        self.assertTrue(match_correspondent("Иванов", expected))
+        self.assertFalse(match_correspondent("Сиванов И И", expected))
 
 
 if __name__ == "__main__":

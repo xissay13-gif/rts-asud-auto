@@ -8,7 +8,7 @@ from shared.ui import DropdownOptions
 
 
 ADDRESS = "644021, г. Омск, ул. 4-я Транспортная, д. 15, кв. 8"
-FIO = "Камшилин Сергей Александрович"
+FIO = "Иванов Иван Иванович"
 
 
 class _ImmediateWait:
@@ -357,7 +357,7 @@ class CorrespondentSelectionTests(unittest.TestCase):
         candidate = _Candidate(FIO, css_class="x-boundlist-item")
         lookups = [
             DropdownOptions([], popup_seen=True, empty_explicit=True),
-            DropdownOptions([candidate], popup_seen=True, input_value="Камшилин"),
+            DropdownOptions([candidate], popup_seen=True, input_value="Иванов"),
         ]
 
         with (
