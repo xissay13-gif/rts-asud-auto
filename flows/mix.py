@@ -45,6 +45,7 @@ from shared.ui import (click, wait_and_click, find_input_near_label,
                 set_driver_timeout)
 from shared.correspondent import (fill_correspondent_field, match_strict, fio_to_initials,
                            extract_fio_from_text)
+from shared.addressee import add_addressee as _add_addressee_verified
 from shared.attachments import find_msg_by_link, get_dummy_msg, attach_content, move_to_done
 from shared.xlsx_format import format_registry_before_save
 from shared.registration import run_registration
@@ -563,7 +564,7 @@ def _poll_addressee_chip(driver, inp, surname, timeout=1.0):
     return False
 
 
-def add_addressee(driver, person_name):
+def _add_addressee_legacy(driver, person_name):
     """Добавляет одного адресата через combobox.
     Multi-strategy click + проверка появления chip — GXT не всегда
     пропагирует value сразу после ActionChains.click.
@@ -677,6 +678,13 @@ def add_addressee(driver, person_name):
 
     log.warning(f"Адресат '{person_name}': клик прошёл, chip не появился — "
                 f"идём дальше (возможно value в скрытом узле)")
+
+
+# The legacy implementation above looked for a non-existent "chip" in the
+# search input ancestors and trusted a dispatched click. Every production call
+# is routed through the verified grid-row implementation below.
+def add_addressee(driver, person_name):
+    return _add_addressee_verified(driver, person_name, logger=log)
 
 
 # ================= REGISTRATION =================
@@ -1141,7 +1149,12 @@ def create_one_document(driver, doc_data, index, total):
     fill_corr_date(driver, override=doc_data.get("дата_обращения"))
 
     for addr in settings.get("addressees", cfg.DEFAULTS["addressees"]):
-        add_addressee(driver, addr)
+        if not add_addressee(driver, addr):
+            _last_result["status"] = "FAILED"
+            log.error("Адресат не подтверждён — документ остановлен до сохранения")
+            close_open_modals(driver)
+            close_card_and_wait_main(driver)
+            raise RuntimeError("поле Адресат не подтверждено")
 
     fill_delivery_method(driver)
 

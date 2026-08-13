@@ -33,6 +33,7 @@ from shared.ui import (click, wait_and_click, find_input_near_label,
                         js_set_value, js_type_combobox, find_dropdown_options,
                         set_driver_timeout)
 from shared.correspondent import fill_correspondent_field, match_correspondent
+from shared.addressee import add_addressee as _add_addressee_verified
 from shared.attachments import find_msg_by_link, get_dummy_msg, attach_content, move_to_done
 
 
@@ -230,7 +231,7 @@ def fill_delivery_method(driver):
         log.warning(f"'{target}' не найдена")
 
 
-def add_addressee(driver, person_name):
+def _add_addressee_legacy(driver, person_name):
     """Добавляет адресата через combobox (JS-typing + WebDriverWait)."""
     inp = find_input_near_label(driver, "Адресаты")
     if not inp:
@@ -270,6 +271,11 @@ def add_addressee(driver, person_name):
         log.info(f"Адресат: {person_name}")
     else:
         log.warning(f"Адресат не найден: {person_name}")
+
+
+def add_addressee(driver, person_name):
+    """Совместимый wrapper общей fail-closed реализации."""
+    return _add_addressee_verified(driver, person_name, logger=log)
 
 
 # ================= DOCUMENT FLOW =================
@@ -313,7 +319,11 @@ def create_one_document(driver, doc_data, index, total):
         raise RuntimeError("поле Корреспондент не подтверждено")
     fill_corr_number(driver, doc_data.get("link"))
     fill_corr_date(driver)
-    add_addressee(driver, settings.get("addressee", "Басманов Александр Владимирович"))
+    if not add_addressee(driver, settings.get(
+            "addressee", "Басманов Александр Владимирович")):
+        log.error("Адресат не подтверждён — документ остановлен до сохранения")
+        close_open_modals(driver)
+        raise RuntimeError("поле Адресат не подтверждено")
     fill_delivery_method(driver)
 
     # [3/6] Сохранить (документ становится черновиком)
