@@ -12,6 +12,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import StaleElementReferenceException
 
 log = logging.getLogger("asud.ui")
 
@@ -68,17 +69,49 @@ def click(driver, element, description=""):
 
 
 def wait_and_click(driver, by, selector, description="", timeout=20):
-    """Ждёт элемент и кликает. Без post-sleep."""
+    """Ждёт кликабельный элемент и кликает. Без post-sleep.
+
+    GWT/GXT может перерисовать найденный узел прямо между ожиданием и
+    ``click()``. В таком случае повторно ищем элемент по локатору. Перед JS
+    fallback элемент тоже ищется заново: устаревший WebElement повторно
+    использовать нельзя.
+    """
     log.info(f"Ожидаю: {description or selector}")
-    el = WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((by, selector))
-    )
-    try:
-        el.click()
-    except Exception:
-        driver.execute_script("arguments[0].click();", el)
-    log.info(f"Клик: {description or selector}")
-    return el
+    locator = (by, selector)
+    deadline = time.monotonic() + timeout
+    max_attempts = 3
+
+    def find_fresh_clickable():
+        remaining = max(0.0, deadline - time.monotonic())
+        return WebDriverWait(driver, remaining).until(
+            EC.element_to_be_clickable(locator)
+        )
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            el = find_fresh_clickable()
+            try:
+                el.click()
+            except StaleElementReferenceException:
+                raise
+            except Exception:
+                # Не используем handle, на котором уже упал native click.
+                el = find_fresh_clickable()
+                driver.execute_script("arguments[0].click();", el)
+
+            log.info(f"Клик: {description or selector}")
+            return el
+        except StaleElementReferenceException:
+            if attempt == max_attempts:
+                raise
+            log.debug(
+                "Элемент устарел при клике (%s/%s), ищу заново: %s",
+                attempt,
+                max_attempts,
+                description or selector,
+            )
+
+    raise AssertionError("unreachable")
 
 
 _FIND_INPUT_JS = """
@@ -305,27 +338,246 @@ def js_set_value(driver, element, value):
     """, element, value)
 
 
-_FIND_OPTIONS_JS = """
+_FIND_OPTIONS_JS = r"""
 const text = arguments[0], inp = arguments[1];
 const needle = String(text || '').toLocaleLowerCase('ru-RU');
-const nodes = document.querySelectorAll('div,span,td,li,a');
-const out = [];
-for (const r of nodes) {
-    if (!r.offsetParent) continue;
-    if (r === inp) continue;
-    if (r.tagName === 'INPUT') continue;
-    if ((r.textContent || '').length > 150) continue;
-    if (!(r.textContent || '').toLocaleLowerCase('ru-RU').includes(needle)) continue;
-    out.push(r);
+
+function visible(el) {
+    if (!el || !el.isConnected) return false;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 &&
+        style.display !== 'none' && style.visibility !== 'hidden' &&
+        parseFloat(style.opacity || '1') > 0.01;
 }
-return out;
+
+if (!inp || !visible(inp)) {
+    return {popup_seen: false, empty_explicit: false, loading: false, options: []};
+}
+
+const ir = inp.getBoundingClientRect();
+const linkedIds = String(inp.getAttribute('aria-controls') ||
+    inp.getAttribute('aria-owns') || '').split(/\s+/).filter(Boolean);
+const roots = [];
+const rootSeen = new Set();
+
+function popupClass(cls) {
+    const value = String(cls || '');
+    if (/(boundlist-item|combo-list-item|menu-item|select-option|list-item)/i.test(value)) {
+        return false;
+    }
+    return /(?:^|[\s_-])(popup|dropdown|boundlist|combo-list|listbox|popupmenu)(?:$|[\s_-])/i.test(value) ||
+        /(PopupPanel|MenuPanel|BoundList|ComboList)/i.test(value);
+}
+
+function addRoot(el, linked) {
+    if (!el || rootSeen.has(el) || !visible(el) || el.contains(inp)) return;
+    const r = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const cls = (el.className || '').toString();
+    const positioned = style.position === 'absolute' || style.position === 'fixed';
+    const semantic = role === 'listbox' || role === 'menu' || popupClass(cls);
+    if (!linked && !positioned && !semantic) return;
+
+    const overlapPx = Math.max(0,
+        Math.min(r.right, ir.right) - Math.max(r.left, ir.left));
+    const overlapRatio = overlapPx / Math.max(1, Math.min(r.width, ir.width));
+    const widthRatio = r.width / Math.max(1, ir.width);
+    const belowGap = r.top - ir.bottom;
+    const aboveGap = ir.top - r.bottom;
+    const roomBelow = window.innerHeight - ir.bottom;
+    const directBelow = belowGap >= -8 && belowGap <= 96;
+    const directAbove = roomBelow < Math.max(120, Math.min(r.height, 300)) &&
+        aboveGap >= -8 && aboveGap <= 96;
+    const anchored = overlapRatio >= 0.55 && widthRatio >= 0.45 &&
+        widthRatio <= 2.5 && r.height >= 16 && (directBelow || directAbove);
+    const semanticNear = overlapRatio >= 0.35 &&
+        Math.min(Math.abs(belowGap), Math.abs(aboveGap)) <= 140;
+    if (!linked && !(anchored || (semantic && semanticNear))) return;
+    if (!linked && r.width > window.innerWidth * 0.96 &&
+            r.height > window.innerHeight * 0.85) return;
+
+    const rootText = (el.textContent || '').toLocaleLowerCase('ru-RU');
+    const hasNeedle = needle && rootText.includes(needle);
+    const saysEmpty = /(ничего\s+не\s+найдено|нет\s+(данных|результат)|совпадени\w*\s+не\s+найден\w*|запис\w*\s+не\s+найден\w*|данн\w*\s+отсутству\w*|no\s+(data|result))/i.test(rootText);
+    const loadingHint = el.getAttribute('aria-busy') === 'true' ||
+        !!el.querySelector("[aria-busy='true'],[class*='loading'],[class*='Loading']");
+    // Arbitrary page text never turns into a popup merely because it contains
+    // the query. An obfuscated list is accepted only by its strict anchor
+    // geometry directly below (or, when there is no room, above) the input.
+    if (!linked && !semantic && (!anchored ||
+            (rootText.trim() && !hasNeedle && !saysEmpty && !loadingHint))) return;
+    if (!linked && !semantic &&
+            el.querySelector('input,textarea,select') &&
+            !hasNeedle && !saysEmpty && !loadingHint) return;
+    if (!linked && semantic && rootText.trim() && !hasNeedle && !saysEmpty) return;
+
+    let z = parseInt(style.zIndex, 10);
+    if (!Number.isFinite(z)) z = 0;
+    const edgeGap = directBelow ? Math.abs(belowGap) : Math.abs(aboveGap);
+    const score = (linked ? 1000000 : 0) + (semantic ? 100000 : 0) +
+        (directBelow ? 50000 : 0) + (directAbove ? 40000 : 0) +
+        (saysEmpty ? 2000 : 0) + (hasNeedle ? 500 : 0) +
+        (positioned ? 1000 : 0) + z - edgeGap;
+    rootSeen.add(el);
+    roots.push({el, score, emptyExplicit: saysEmpty});
+}
+
+for (const id of linkedIds) addRoot(document.getElementById(id), true);
+
+const textNodes = document.querySelectorAll('div,span,td,li,a');
+for (const node of textNodes) {
+    if (!visible(node) || node === inp) continue;
+    const value = (node.textContent || '').trim();
+    if (!value || value.length > 500 || !value.toLocaleLowerCase('ru-RU').includes(needle)) continue;
+    let el = node;
+    for (let level = 0; level < 12 && el && el !== document.body;
+            level++, el = el.parentElement) {
+        const style = window.getComputedStyle(el);
+        const role = (el.getAttribute('role') || '').toLowerCase();
+        const cls = (el.className || '').toString();
+        if (style.position === 'absolute' || style.position === 'fixed' ||
+                role === 'listbox' || role === 'menu' || popupClass(cls)) {
+            addRoot(el, false);
+            break;
+        }
+    }
+}
+
+// Needed for linked/semantic empty lists and explicit "no results" states.
+for (const el of document.querySelectorAll('div,ul,ol,table,tbody')) {
+    const style = visible(el) ? window.getComputedStyle(el) : null;
+    if (style && (style.position === 'absolute' || style.position === 'fixed')) {
+        addRoot(el, false);
+    }
+}
+
+roots.sort((a, b) => b.score - a.score);
+const popup = roots.length ? roots[0].el : null;
+if (!popup) {
+    return {popup_seen: false, empty_explicit: false, loading: false, options: []};
+}
+
+function semanticOption(el) {
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const cls = (el.className || '').toString();
+    return role === 'option' ||
+        /(?:^|[\s_-])(option|menu-item|select-option|combo-item|boundlist-item|list-item)(?:$|[\s_-])/i.test(cls) ||
+        /gxt-\w*item|x-combo-list-item|x-boundlist-item|ListItem|SelectItem/i.test(cls);
+}
+
+function optionFrom(node) {
+    let el = node;
+    if (semanticOption(popup)) return popup;
+    const popupRect = popup.getBoundingClientRect();
+    let nearestVisible = node;
+    for (let level = 0; level < 10 && el && el !== popup;
+            level++, el = el.parentElement) {
+        if (semanticOption(el)) return el;
+        const er = el.getBoundingClientRect();
+        const display = window.getComputedStyle(el).display;
+        const value = (el.textContent || '').trim();
+        if (visible(el) && value.length <= 500 && er.height <= 160) {
+            nearestVisible = el;
+            // Obfuscated GXT rows have no semantic class. The nearest
+            // block/table-like full-width ancestor is the row. Inline text
+            // may span the same width but has no row click handler.
+            if (display !== 'inline' && display !== 'contents' &&
+                    er.width >= Math.max(80, popupRect.width * 0.45) &&
+                    er.height >= 16) {
+                return el;
+            }
+        }
+    }
+    return nearestVisible;
+}
+
+const options = [];
+const optionSeen = new Set();
+for (const node of popup.querySelectorAll('div,span,td,li,a')) {
+    if (!visible(node)) continue;
+    const value = (node.textContent || '').trim();
+    if (!value || value.length > 500 || !value.toLocaleLowerCase('ru-RU').includes(needle)) continue;
+    const matchingChild = Array.from(node.children).some(child =>
+        visible(child) && (child.textContent || '').toLocaleLowerCase('ru-RU').includes(needle));
+    if (matchingChild) continue;
+    const option = optionFrom(node);
+    if (!visible(option) || optionSeen.has(option)) continue;
+    optionSeen.add(option);
+    options.push(option);
+}
+const popupEntry = roots[0];
+const loading = popup.getAttribute('aria-busy') === 'true' ||
+    !!popup.querySelector("[aria-busy='true'],[class*='loading'],[class*='Loading']");
+window.__asudPopupIds = window.__asudPopupIds || new WeakMap();
+window.__asudPopupSeq = window.__asudPopupSeq || 0;
+if (!window.__asudPopupIds.has(popup)) {
+    window.__asudPopupIds.set(popup, `asud-popup-${++window.__asudPopupSeq}`);
+}
+const pr = popup.getBoundingClientRect();
+let textHash = 0;
+const signatureText = String(popup.textContent || '');
+for (let i = 0; i < signatureText.length; i++) {
+    textHash = ((textHash * 31) + signatureText.charCodeAt(i)) | 0;
+}
+return {
+    popup_seen: true,
+    empty_explicit: !!popupEntry.emptyExplicit,
+    root_blank: !String(popup.textContent || '').trim(),
+    loading,
+    popup_key: window.__asudPopupIds.get(popup),
+    signature: [Math.round(pr.left), Math.round(pr.top), Math.round(pr.width),
+        Math.round(pr.height), popup.childElementCount,
+        signatureText.length, textHash,
+        (popup.className || '').toString()].join('|'),
+    input_value: String(inp.value || '').replace(/\s+/g, ' ').trim(),
+    options,
+};
 """
 
 
+class DropdownOptions(list):
+    """Список вариантов с признаком, что popup конкретного input распознан."""
+
+    def __init__(self, values=(), *, popup_seen=False,
+                 empty_explicit=False, loading=False, popup_key=None,
+                 signature=None, input_value="", root_blank=False,
+                 input_observed=False):
+        super().__init__(values or ())
+        self.popup_seen = bool(popup_seen)
+        self.empty_explicit = bool(empty_explicit)
+        self.loading = bool(loading)
+        self.popup_key = popup_key
+        self.signature = signature
+        self.input_value = str(input_value or "").strip()
+        self.input_observed = bool(input_observed)
+        self.root_blank = bool(root_blank)
+        self.scoped = True
+
+
 def find_dropdown_options(driver, text, anchor_input):
-    """Возвращает видимые варианты выпадашки, где text встречается в textContent.
-    Один JS-вызов вместо N+1 Selenium round-trips."""
-    return driver.execute_script(_FIND_OPTIONS_JS, text, anchor_input)
+    """Возвращает только реальные option-контейнеры выпадающего списка.
+
+    Текст документа намеренно не считается вариантом. Это особенно важно для
+    feedback-писем: адрес одновременно присутствует в кратком содержании и в
+    строке поиска корреспондента.
+    """
+    state = driver.execute_script(_FIND_OPTIONS_JS, text, anchor_input)
+    if isinstance(state, dict):
+        return DropdownOptions(
+            state.get("options") or (),
+            popup_seen=state.get("popup_seen", False),
+            empty_explicit=state.get("empty_explicit", False),
+            loading=state.get("loading", False),
+            popup_key=state.get("popup_key"),
+            signature=state.get("signature"),
+            input_value=state.get("input_value", ""),
+            input_observed="input_value" in state,
+            root_blank=state.get("root_blank", False),
+        )
+    # Совместимость с тестовыми/старыми драйверами, возвращавшими только list.
+    return DropdownOptions(state or (), popup_seen=bool(state))
 
 
 def js_type_combobox(driver, element, value):

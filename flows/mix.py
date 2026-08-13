@@ -784,7 +784,11 @@ def _post_register_check(driver, timeout=5):
 
 
 def register_and_resolve(driver, index, total):
-    """Регистрирует + На резолюцию + Да. Возвращает asud_id (если захватили) или None."""
+    """Регистрирует + На резолюцию + Да.
+
+    Возвращает пару ``(registered, asud_id)``. Номер может не захватиться даже
+    при состоявшейся регистрации, поэтому он не служит флагом успеха.
+    """
     log.info("Регистрирую...")
     registered = False
     asud_id = None
@@ -813,7 +817,7 @@ def register_and_resolve(driver, index, total):
                 log.error(f"Retry клик упал: {e}")
             if not res_btn:
                 log.error(f"Документ {index}/{total}: НЕ зарегистрирован — пропускаю 'На резолюцию'")
-                return None
+                return False, None
         registered = True
     except Exception:
         try:
@@ -826,7 +830,7 @@ def register_and_resolve(driver, index, total):
             log.error(f"'Зарегистрировать' не найдена: {e}")
 
     if not registered:
-        return None
+        return False, None
 
     # res_btn уже получен из _post_register_check выше. Захват номера до 1.5s
     # — если за это время не появился, идём дальше с пустым (записываем в xlsx
@@ -839,7 +843,7 @@ def register_and_resolve(driver, index, total):
 
     if not res_btn:
         log.warning("'На резолюцию' не появилась")
-        return asud_id
+        return True, asud_id
 
     click(driver, res_btn, "На резолюцию")
 
@@ -955,7 +959,7 @@ def register_and_resolve(driver, index, total):
         log.info(f"Документ {index}/{total} НА РЕЗОЛЮЦИИ")
     else:
         log.warning("Диалог 'Да' не появился за 10 сек")
-    return asud_id
+    return True, asud_id
 
 
 def close_card_and_wait_main(driver):
@@ -1080,11 +1084,17 @@ def create_one_document(driver, doc_data, index, total):
 
     # [4/7] Заполнение формы
     fill_text(driver, doc_data["содержание"])
-    fill_correspondent_field(
+    correspondent_ready = fill_correspondent_field(
         driver,
         doc_data["корреспондент"],
         kind=doc_data.get("корреспондент_тип", "person"),
     )
+    if not correspondent_ready:
+        _last_result["status"] = "FAILED"
+        log.error("Корреспондент не выбран и не создан — документ остановлен")
+        close_open_modals(driver)
+        close_card_and_wait_main(driver)
+        raise RuntimeError("поле Корреспондент не подтверждено")
     fill_corr_number(driver, doc_data.get("link"),
                       override=doc_data.get("номер_обращения"))
     fill_corr_date(driver, override=doc_data.get("дата_обращения"))
@@ -1106,17 +1116,19 @@ def create_one_document(driver, doc_data, index, total):
             log.warning(f"Документ {index}/{total}: АСУД говорит УЖЕ ЗАРЕГИСТРИРОВАН — пропускаю")
             close_open_modals(driver)
             _last_result["status"] = "DUPLICATE"
+            close_card_and_wait_main(driver)
             return None  # caller увидит None и не запишет в output
         # Ждём кнопку 'Зарегистрировать' — признак что save прошёл и форма ушла в режим регистрации
-        try:
-            WebDriverWait(driver, cfg.DEFAULTS["timeout"]).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR,
-                    "#header-action-btn-register, [id*='header-action-btn-register']")))
-        except Exception:
-            log.warning("После Сохранить кнопка 'Зарегистрировать' не появилась")
+        WebDriverWait(driver, cfg.DEFAULTS["timeout"]).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR,
+                "#header-action-btn-register, [id*='header-action-btn-register']")))
         log.info(f"Документ {index}/{total} сохранён")
     except Exception as e:
         log.error(f"Ошибка сохранения: {e}")
+        _last_result["status"] = "FAILED"
+        close_open_modals(driver)
+        close_card_and_wait_main(driver)
+        raise RuntimeError("Сохранение документа не подтверждено") from e
 
     # [6/7] Прикрепление
     outlook_dir = settings.get("outlook_dir", cfg.DEFAULTS["outlook_dir"])
@@ -1145,12 +1157,15 @@ def create_one_document(driver, doc_data, index, total):
     # [7/7] Регистрация (если ФИО найдено) или черновик
     asud_id = None
     if doc_data["корр_найден"]:
-        asud_id = register_and_resolve(driver, index, total)
+        registered, asud_id = register_and_resolve(driver, index, total)
         # После успешной регистрации — реальный (не dummy) .msg → Завершено/
         # Черновики НЕ переносим: файл нужен для ручной доработки.
-        if attach_path and attach_path != dummy_path:
+        if registered and attach_path and attach_path != dummy_path:
             move_to_done(attach_path, outlook_dir)
-        _last_result["status"] = "OK" if asud_id else "FAILED"
+        _last_result["status"] = "OK" if registered else "FAILED"
+        if not registered:
+            close_card_and_wait_main(driver)
+            raise RuntimeError("Регистрация документа не подтверждена")
     else:
         log.warning(f"Row {doc_data['row_idx']}: ФИО НЕ найдено — "
                     f"оставляю в ЧЕРНОВИКАХ для ручной доработки "

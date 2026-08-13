@@ -34,7 +34,7 @@ from shared.ui import (click, wait_and_click, find_input_near_label,
                 js_set_value, js_type_combobox, find_dropdown_options,
                 wait_pointer_events_auto, is_duplicate_warning,
                 set_driver_timeout)
-from shared.correspondent import (fill_correspondent_field, match_correspondent)
+from shared.correspondent import fill_correspondent_field, match_correspondent
 from shared.attachments import get_dummy_msg, attach_content
 from shared.xlsx_format import format_registry_before_save
 
@@ -391,7 +391,7 @@ def _post_register_check(driver, timeout=5):
 
 
 def register_and_resolve(driver, index, total):
-    """Регистрирует + На резолюцию + Да. Возвращает asud_id (или None)."""
+    """Регистрирует + На резолюцию + Да; возвращает (registered, asud_id)."""
     log.info("Регистрирую...")
     registered = False
     asud_id = None
@@ -420,7 +420,7 @@ def register_and_resolve(driver, index, total):
                 log.error(f"Retry клик упал: {e}")
             if not res_btn:
                 log.error(f"Документ {index}/{total}: НЕ зарегистрирован — пропускаю 'На резолюцию'")
-                return None
+                return False, None
         registered = True
     except Exception:
         try:
@@ -433,7 +433,7 @@ def register_and_resolve(driver, index, total):
             log.error(f"'Зарегистрировать' не найдена: {e}")
 
     if not registered:
-        return None
+        return False, None
 
     # res_btn уже получен из _post_register_check выше — не ждём заново.
     # Захват номера до 1.5s — если за это время не появился, идём дальше
@@ -544,7 +544,7 @@ def register_and_resolve(driver, index, total):
             log.warning("Диалог 'Да' не появился за 10 сек")
     else:
         log.warning("'На резолюцию' не появилась")
-    return asud_id
+    return True, asud_id
 
 
 # ================= DOCUMENT FLOW =================
@@ -587,7 +587,10 @@ def create_one_document(driver, doc_data, index, total):
         log.warning("Textarea формы не появилась")
 
     fill_text(driver, doc_data["содержание"])
-    fill_correspondent_field(driver, doc_data["корреспондент"])
+    if not fill_correspondent_field(driver, doc_data["корреспондент"]):
+        log.error("Корреспондент не выбран и не создан — документ остановлен")
+        close_open_modals(driver)
+        raise RuntimeError("поле Корреспондент не подтверждено")
     fill_corr_number(driver, index)
     fill_corr_date(driver)
 
@@ -605,17 +608,21 @@ def create_one_document(driver, doc_data, index, total):
         if is_duplicate_warning(driver):
             log.warning(f"Документ {index}/{total}: АСУД говорит УЖЕ ЗАРЕГИСТРИРОВАН — пропускаю")
             close_open_modals(driver)
+            try:
+                driver.get(settings.get("asud_url", cfg.DEFAULTS["asud_url"]))
+                wait_asud_loaded(driver)
+            except Exception:
+                pass
             return None
         # Ждём появления "Зарегистрировать" — признак что save прошёл
-        try:
-            WebDriverWait(driver, cfg.DEFAULTS["timeout"]).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR,
-                    "#header-action-btn-register, [id*='header-action-btn-register']")))
-        except Exception:
-            log.warning("После Сохранить кнопка 'Зарегистрировать' не появилась")
+        WebDriverWait(driver, cfg.DEFAULTS["timeout"]).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR,
+                "#header-action-btn-register, [id*='header-action-btn-register']")))
         log.info(f"Документ {index}/{total} сохранён")
     except Exception as e:
         log.error(f"Ошибка сохранения: {e}")
+        close_open_modals(driver)
+        raise RuntimeError("Сохранение документа не подтверждено") from e
 
     if doc_data.get("файл"):
         attached = attach_content(driver, doc_data["файл"])
@@ -625,7 +632,9 @@ def create_one_document(driver, doc_data, index, total):
         else:
             log.warning(f"Документ {index}/{total}: вложение НЕ прикреплено ✗")
 
-    asud_id = register_and_resolve(driver, index, total)
+    registered, asud_id = register_and_resolve(driver, index, total)
+    if not registered:
+        raise RuntimeError("Регистрация документа не подтверждена")
 
     # Ждём что появится первым: либо главный экран (карточка авто-закрылась),
     # либо close-btn (карточка ещё открыта). До 10s, но обычно <1s.

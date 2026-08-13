@@ -307,7 +307,10 @@ def create_one_document(driver, doc_data, index, total):
 
     # [2/6] Заполнение
     fill_text(driver, doc_data["содержание"])
-    fill_correspondent_field(driver, doc_data["корреспондент"])
+    if not fill_correspondent_field(driver, doc_data["корреспондент"]):
+        log.error("Корреспондент не выбран и не создан — документ остановлен")
+        close_open_modals(driver)
+        raise RuntimeError("поле Корреспондент не подтверждено")
     fill_corr_number(driver, doc_data.get("link"))
     fill_corr_date(driver)
     add_addressee(driver, settings.get("addressee", "Басманов Александр Владимирович"))
@@ -320,15 +323,14 @@ def create_one_document(driver, doc_data, index, total):
         click(driver, save_btn, "Сохранить")
         # После Save должен появиться 'Зарегистрировать' (форма ушла в режим
         # черновика-готового-к-регистрации) — но мы НЕ регистрируем.
-        try:
-            WebDriverWait(driver, cfg.DEFAULTS["timeout"]).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR,
-                    "#header-action-btn-register, [id*='header-action-btn-register']")))
-        except Exception:
-            log.warning("Save: 'Зарегистрировать' не появилась")
+        WebDriverWait(driver, cfg.DEFAULTS["timeout"]).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR,
+                "#header-action-btn-register, [id*='header-action-btn-register']")))
         log.info(f"Документ {index}/{total} сохранён в черновиках")
     except Exception as e:
         log.error(f"Ошибка сохранения: {e}")
+        close_open_modals(driver)
+        raise RuntimeError("Сохранение черновика не подтверждено") from e
 
     # [4/6] Прикрепление .msg по Link (или dummy)
     outlook_dir = settings.get("outlook_dir", cfg.DEFAULTS["outlook_dir"])

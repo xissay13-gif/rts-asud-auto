@@ -958,7 +958,7 @@ def daemon_main():
     wait_asud_loaded(driver)
 
     # Счётчики и retry-state
-    retry_count = {}  # basename → int (фейлов подряд)
+    retry_count = {}  # абсолютный путь MSG → int (фейлов подряд)
     totals = {"OK": 0, "DUPLICATE": 0, "DRAFT": 0, "FAILED": 0, "ITER": 0}
     rr_idx = 0  # для round-robin между папками
 
@@ -975,13 +975,14 @@ def daemon_main():
             if _stop_flag:
                 return idx
             name = os.path.basename(msg_path)
+            retry_key = os.path.normcase(os.path.abspath(msg_path))
 
             doc = _parse_one_msg(msg_path, process_mode)
             if doc is None:
                 move_to_errors(msg_path, current_folder,
                                "Не удалось распарсить или пустое")
                 totals["FAILED"] += 1
-                retry_count.pop(name, None)
+                retry_count.pop(retry_key, None)
                 _print_doc_line(idx, len(queue), "FAILED",
                                  "не распарсилось / пустое")
                 continue
@@ -993,19 +994,19 @@ def daemon_main():
                                        process_mode=process_mode,
                                        output_suffix=current_suffix)
                 if status == "FAILED":
-                    retry_count[name] = retry_count.get(name, 0) + 1
-                    if retry_count[name] >= max_retries:
+                    retry_count[retry_key] = retry_count.get(retry_key, 0) + 1
+                    if retry_count[retry_key] >= max_retries:
                         move_to_errors(msg_path, current_folder,
                             f"Регистрация не удалась за {max_retries} попыток")
-                        retry_count.pop(name, None)
+                        retry_count.pop(retry_key, None)
                         totals["FAILED"] += 1
                         _print_doc_line(idx, len(queue), "FAILED",
                                          f"max_retries ({max_retries}) → Ошибки/")
                     else:
-                        log.warning(f"{name}: фейл {retry_count[name]}/{max_retries} "
+                        log.warning(f"{name}: фейл {retry_count[retry_key]}/{max_retries} "
                                     f"— оставляю в корне на следующую итерацию")
                         _print_doc_line(idx, len(queue), "FAILED",
-                                         f"retry {retry_count[name]}/{max_retries}")
+                                         f"retry {retry_count[retry_key]}/{max_retries}")
                     try:
                         driver.get(url)
                         wait_asud_loaded(driver)
@@ -1013,15 +1014,15 @@ def daemon_main():
                         pass
                 else:
                     totals[status] = totals.get(status, 0) + 1
-                    retry_count.pop(name, None)
+                    retry_count.pop(retry_key, None)
                     _print_doc_line(idx, len(queue), status,
                                      doc.get("тема", "")[:60])
             except Exception as e:
                 log.error(f"Exception на {name}: {e}")
-                retry_count[name] = retry_count.get(name, 0) + 1
-                if retry_count[name] >= max_retries:
+                retry_count[retry_key] = retry_count.get(retry_key, 0) + 1
+                if retry_count[retry_key] >= max_retries:
                     move_to_errors(msg_path, current_folder, f"Exception: {e}")
-                    retry_count.pop(name, None)
+                    retry_count.pop(retry_key, None)
                     totals["FAILED"] += 1
                 _print_doc_line(idx, len(queue), "FAILED", str(e)[:80])
                 try:

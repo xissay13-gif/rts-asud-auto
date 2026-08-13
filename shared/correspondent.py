@@ -17,7 +17,6 @@ import logging
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 from shared.ui import (click, find_input_near_label, close_open_modals,
                 js_type_combobox, find_dropdown_options, cdp_click)
@@ -174,174 +173,307 @@ def match_legal_correspondent(text, legal_name):
     return bool(expected) and expected in actual
 
 
+_FIND_CORRESPONDENT_ADD_BUTTON_JS = r"""
+const inp = arguments[0];
+if (!inp || !inp.isConnected) return null;
+const ir = inp.getBoundingClientRect();
+const inputY = ir.top + ir.height / 2;
+const candidates = [];
+let root = inp;
+for (let level = 0; level < 8 && root; level++, root = root.parentElement) {
+    const nodes = root.querySelectorAll(
+        "[data-marker='select-btn'], button, [role='button'], img.gwt-Image, img"
+    );
+    for (const el of nodes) {
+        if (!el.isConnected) continue;
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        if (r.width <= 0 || r.height <= 0 || style.display === 'none' ||
+                style.visibility === 'hidden') continue;
+        const cy = r.top + r.height / 2;
+        if (Math.abs(cy - inputY) > Math.max(35, ir.height * 1.75)) continue;
+        if (r.right < ir.left - 15 || r.left > ir.right + 180) continue;
+
+        const marker = (el.getAttribute('data-marker') || '').toLowerCase();
+        const hint = [el.getAttribute('title'), el.getAttribute('aria-label'),
+            el.getAttribute('alt'), el.textContent].filter(Boolean).join(' ').toLowerCase();
+        let score = 0;
+        if (marker === 'select-btn') score += 1000;
+        if (/(добав|выбр|созд|select|add|choose|\+)/i.test(hint)) score += 250;
+        if (r.left >= ir.right - 25) score += 100;
+        score -= Math.abs(r.left - ir.right);
+        score -= level * 5;
+        candidates.push({el, score});
+    }
+}
+candidates.sort((a, b) => b.score - a.score);
+return candidates.length && candidates[0].score > -100 ? candidates[0].el : null;
+"""
+
+
+def _find_correspondent_add_button(driver, input_element):
+    """Находит кнопку выбора/добавления в той же строке, что и поле."""
+    try:
+        return driver.execute_script(
+            _FIND_CORRESPONDENT_ADD_BUTTON_JS, input_element)
+    except Exception:
+        return None
+
+
+_DIALOG_ANCESTOR_XPATH = (
+    "./ancestor::*[@role='dialog' or @aria-modal='true' or "
+    "contains(@class,'ModalPanel') or contains(@class,'DialogBox') or "
+    "contains(@class,'dialog') or contains(@class,'window')]"
+)
+
+_ELEMENT_LAYER_INFO_JS = r"""
+const el = arguments[0];
+if (!el || !el.isConnected) return {known: true, exposed: false, score: -1};
+const r = el.getBoundingClientRect();
+if (r.width <= 0 || r.height <= 0) return {known: true, exposed: false, score: -1};
+const x = Math.max(0, Math.min(window.innerWidth - 1, r.left + r.width / 2));
+const y = Math.max(0, Math.min(window.innerHeight - 1, r.top + r.height / 2));
+const hit = document.elementFromPoint(x, y);
+const exposed = !!hit && (hit === el || el.contains(hit) || hit.contains(el));
+let z = 0, dialogDepth = 0, node = el;
+for (let depth = 0; node && depth < 20; depth++, node = node.parentElement) {
+    const style = window.getComputedStyle(node);
+    const zi = parseInt(style.zIndex, 10);
+    if (Number.isFinite(zi)) z = Math.max(z, zi);
+    const role = (node.getAttribute('role') || '').toLowerCase();
+    const cls = (node.className || '').toString();
+    if (role === 'dialog' || node.getAttribute('aria-modal') === 'true' ||
+            /(ModalPanel|DialogBox|dialog|window|popup)/i.test(cls)) {
+        dialogDepth = Math.max(dialogDepth, 20 - depth);
+    }
+}
+return {known: true, exposed, score: z * 100 + dialogDepth};
+"""
+
+
+def _pick_topmost_visible(driver, elements):
+    """Выбирает видимый элемент верхней модалки, а не контрол под overlay."""
+    visible = []
+    for index, element in enumerate(elements or ()):
+        try:
+            if element.is_displayed():
+                visible.append((index, element))
+        except Exception:
+            continue
+    if not visible:
+        return False
+
+    ranked = []
+    layer_info_known = False
+    for index, element in visible:
+        try:
+            info = driver.execute_script(_ELEMENT_LAYER_INFO_JS, element) or {}
+            if isinstance(info, dict) and info.get("known"):
+                layer_info_known = True
+                if info.get("exposed"):
+                    ranked.append((float(info.get("score", 0)), index, element))
+                continue
+        except Exception:
+            pass
+
+        # Browserless fallback and compatibility with old Selenium: prefer a
+        # candidate that belongs to a dialog over a visible page control.
+        try:
+            dialogs = element.find_elements(By.XPATH, _DIALOG_ANCESTOR_XPATH)
+        except Exception:
+            dialogs = []
+        ranked.append((1000 if dialogs else 0, index, element))
+
+    if layer_info_known and not ranked:
+        return False
+    if not ranked:
+        return visible[0][1]
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return ranked[0][2]
+
+
+def _wait_visible_xpath(driver, xpath, timeout=15):
+    """Ждёт видимый элемент на верхнем UI-слое/в активной модалке."""
+    return WebDriverWait(driver, timeout).until(
+        lambda d: _pick_topmost_visible(
+            d, d.find_elements(By.XPATH, xpath))
+    )
+
+
+def _find_visible(driver, by, selector):
+    """Ищет контрол по locator, предпочитая верхнюю модалку."""
+    search_supported = callable(getattr(driver, "find_elements", None))
+    try:
+        if not search_supported:
+            raise AttributeError("find_elements unavailable")
+        found = _pick_topmost_visible(driver, driver.find_elements(by, selector))
+        if found:
+            return found
+        # Production Selenium search completed and proved that every displayed
+        # candidate is covered by a higher UI layer. Never bypass that verdict
+        # with find_element(), which would return the underlay control again.
+        return None
+    except Exception:
+        if search_supported:
+            return None
+    # Некоторые тестовые/старые драйверы реализуют только find_element.
+    try:
+        element = driver.find_element(by, selector)
+        return element if element.is_displayed() else None
+    except Exception:
+        return None
+
+
 def create_correspondent(driver, person_name, kind="person"):
-    """Создаёт нового корреспондента через 7-шаговый flow."""
+    """Создаёт корреспондента и возвращает True только после проверки поля."""
     legal = _is_legal_kind(kind)
     address_only = _is_address_kind(kind)
     surname, first_name, middle_name = correspondent_card_parts(
         person_name, kind)
     if not surname:
         log.error("Пустое имя корреспондента")
-        return
+        return False
     if not legal and not address_only and len(person_name.strip().split()) < 3:
         log.warning(f"Неполное ФИО '{person_name}' → недостающие = 'Н'")
 
     kind_label = "ЮЛ" if legal else ("АДРЕС" if address_only else "ФЛ")
-    log.info(f"Создаю корреспондента ({kind_label}): "
-             f"{surname} {first_name} {middle_name}")
+    shown_card_name = ("<адрес>" if address_only else
+                       f"{surname} {first_name} {middle_name}")
+    log.info(f"Создаю корреспондента ({kind_label}): {shown_card_name}")
 
     # ШАГ 1: Клик "+" у Корреспондент
     log.info("[1/7] Клик '+' у Корреспондент")
     try:
-        label = driver.find_element(By.XPATH,
-            "//*[normalize-space(text())='Корреспондент']")
-        parent = label
-        plus_btn = None
-        for _ in range(1, 7):
-            parent = parent.find_element(By.XPATH, "..")
-            btns = parent.find_elements(By.CSS_SELECTOR,
-                "img[data-marker='select-btn'], img.gwt-Image")
-            visible = [b for b in btns if b.is_displayed()]
-            if visible:
-                plus_btn = visible[-1]
-                break
+        corr_input = find_input_near_label(driver, "Корреспондент")
+        plus_btn = (_find_correspondent_add_button(driver, corr_input)
+                    if corr_input else None)
         if not plus_btn:
-            log.error("Кнопка '+' не найдена")
-            return
-        click(driver, plus_btn, "+ Корреспондент")
-        try:
-            WebDriverWait(driver, 15).until(EC.presence_of_element_located(
-                (By.XPATH, "//*[contains(text(),'Поиск корреспондента')]")))
-        except Exception:
-            pass
+            log.error("Кнопка '+' у поля Корреспондент не найдена")
+            return False
+        if not click(driver, plus_btn, "+ Корреспондент"):
+            log.error("Кнопка '+' у поля Корреспондент не нажалась")
+            return False
+        _wait_visible_xpath(
+            driver, "//*[contains(normalize-space(text()),'Поиск корреспондента')]", 15)
     except Exception as e:
         log.error(f"Шаг 1: {e}")
         close_open_modals(driver)
-        return
+        return False
 
     # ШАГ 2: 'Добавить' в Поиске
     log.info("[2/7] 'Добавить' в Поиске корреспондента")
     try:
-        WebDriverWait(driver, 15).until(EC.presence_of_element_located(
-            (By.XPATH, "//*[normalize-space(text())='Добавить']")))
-        btns = driver.find_elements(By.XPATH, "//*[normalize-space(text())='Добавить']")
-        add_btn = next((b for b in btns if b.is_displayed()), None)
+        add_btn = _wait_visible_xpath(
+            driver, "//*[normalize-space(text())='Добавить']", 15)
         if not add_btn:
             log.error("Кнопка 'Добавить' не найдена")
             close_open_modals(driver)
-            return
-        click(driver, add_btn, "Добавить")
-        try:
-            WebDriverWait(driver, 15).until(EC.presence_of_element_located(
-                (By.XPATH, "//*[contains(text(),'Редактирование организации') or "
-                 "contains(text(),'Поиск организации')]")))
-        except Exception:
-            pass
+            return False
+        if not click(driver, add_btn, "Добавить"):
+            log.error("Кнопка 'Добавить' не нажалась")
+            close_open_modals(driver)
+            return False
+        _wait_visible_xpath(
+            driver,
+            "//*[contains(normalize-space(text()),'Редактирование организации') or "
+            "contains(normalize-space(text()),'Поиск организации')]",
+            15,
+        )
     except Exception as e:
         log.error(f"Шаг 2: {e}")
         close_open_modals(driver)
-        return
+        return False
 
     # ШАГ 3: Поиск организации → 'Создать организацию'
     log.info("[3/7] Поиск организации")
     try:
-        WebDriverWait(driver, 15).until(EC.presence_of_element_located(
-            (By.XPATH, "//*[normalize-space(text())='Поиск организации']")))
+        org_heading = _wait_visible_xpath(
+            driver, "//*[normalize-space(text())='Поиск организации']", 15)
         # Ввод через JS (атомарно, без stale)
         js_result = driver.execute_script("""
-            var surname = arguments[0];
-            var xpath = "//*[normalize-space(text())='Поиск организации']";
-            var iter = document.evaluate(xpath, document, null,
-                XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
-            var labels = [], node;
-            while ((node = iter.iterateNext()) !== null) {
-                if (node.offsetParent !== null) labels.push(node);
-            }
-            if (!labels.length) return 'no-label';
-            for (var li = 0; li < labels.length; li++) {
-                var parent = labels[li];
-                for (var lvl = 0; lvl < 6; lvl++) {
-                    parent = parent.parentElement;
-                    if (!parent) break;
-                    var inputs = parent.querySelectorAll('input[type="text"]');
-                    for (var i = 0; i < inputs.length; i++) {
-                        var inp = inputs[i];
-                        if (inp.offsetParent !== null && !inp.readOnly) {
-                            inp.focus(); inp.value = surname;
-                            inp.dispatchEvent(new Event('input', {bubbles:true}));
-                            inp.dispatchEvent(new Event('keyup', {bubbles:true}));
-                            inp.dispatchEvent(new Event('change', {bubbles:true}));
-                            return 'ok';
-                        }
+            var heading = arguments[0], surname = arguments[1];
+            if (!heading || !heading.isConnected) return 'no-label';
+            var parent = heading;
+            for (var lvl = 0; lvl < 8; lvl++) {
+                parent = parent.parentElement;
+                if (!parent) break;
+                var inputs = parent.querySelectorAll('input[type="text"]');
+                for (var i = 0; i < inputs.length; i++) {
+                    var inp = inputs[i];
+                    if (inp.offsetParent !== null && !inp.readOnly) {
+                        inp.focus(); inp.value = surname;
+                        inp.dispatchEvent(new Event('input', {bubbles:true}));
+                        inp.dispatchEvent(new Event('keyup', {bubbles:true}));
+                        inp.dispatchEvent(new Event('change', {bubbles:true}));
+                        return 'ok';
                     }
                 }
             }
             return 'no-input';
-        """, surname)
+        """, org_heading, surname)
         log.info(f"JS ввод: {js_result}")
         if js_result != 'ok':
+            log.error("Поле 'Поиск организации' не найдено")
             close_open_modals(driver)
-            return
+            return False
 
         # Ждём кнопку "Создать организацию"
         create_org_btn = None
         for _ in range(10):
-            try:
-                btn = driver.find_element(By.CSS_SELECTOR,
-                    "[id*='create_custom_org'], [id*='custom_org_button']")
-                if btn.is_displayed():
-                    create_org_btn = btn
-                    break
-            except Exception:
-                pass
-            btns = driver.find_elements(By.XPATH,
-                "//*[contains(text(),'Создать организацию')]")
-            for b in btns:
-                if b.is_displayed():
-                    create_org_btn = b
-                    break
+            create_org_btn = _find_visible(
+                driver,
+                By.CSS_SELECTOR,
+                "[id*='create_custom_org'], [id*='custom_org_button']",
+            )
+            if not create_org_btn:
+                create_org_btn = _pick_topmost_visible(
+                    driver,
+                    driver.find_elements(
+                        By.XPATH, "//*[contains(text(),'Создать организацию')]"),
+                )
             if create_org_btn:
                 break
             time.sleep(1)
 
         if create_org_btn:
-            click(driver, create_org_btn, "Создать организацию")
+            if not click(driver, create_org_btn, "Создать организацию"):
+                log.error("Кнопка 'Создать организацию' не нажалась")
+                close_open_modals(driver)
+                return False
             time.sleep(1)
         else:
             log.warning("Кнопка 'Создать организацию' не найдена")
             close_open_modals(driver)
-            return
+            return False
     except Exception as e:
         log.error(f"Шаг 3: {e}")
         close_open_modals(driver)
-        return
+        return False
 
     # ШАГ 4: 'Добавить' в Физические лица
     log.info("[4/7] 'Добавить' в Физические лица")
     try:
-        WebDriverWait(driver, 15).until(EC.presence_of_element_located(
-            (By.XPATH, "//*[contains(text(),'Физические лица')]")))
+        _wait_visible_xpath(
+            driver, "//*[contains(text(),'Физические лица')]", 15)
         time.sleep(3)
         add_user_btn = None
         for attempt in range(20):
             try:
-                btn = None
-                try:
-                    btn = driver.find_element(By.CSS_SELECTOR,
-                        "[id*='header-organization-dialog-add-a-user-button']")
-                except Exception:
-                    pass
+                btn = _find_visible(
+                    driver,
+                    By.CSS_SELECTOR,
+                    "[id*='header-organization-dialog-add-a-user-button']",
+                )
                 if not btn:
-                    section = driver.find_element(By.XPATH,
-                        "//*[contains(text(),'Физические лица')]")
+                    section = _wait_visible_xpath(
+                        driver, "//*[contains(text(),'Физические лица')]", 2)
                     parent = section
                     for _ in range(1, 6):
                         parent = parent.find_element(By.XPATH, "..")
                         bs = parent.find_elements(By.XPATH,
                             ".//*[normalize-space(text())='Добавить']")
-                        vis = [b for b in bs if b.is_displayed()]
-                        if vis:
-                            btn = vis[0]
+                        btn = _pick_topmost_visible(driver, bs)
+                        if btn:
                             break
                 if btn:
                     is_enabled = driver.execute_script("""
@@ -363,17 +495,17 @@ def create_correspondent(driver, person_name, kind="person"):
         if not add_user_btn:
             log.error("Кнопка 'Добавить' не активировалась")
             close_open_modals(driver)
-            return
-        click(driver, add_user_btn, "Добавить физ. лицо")
-        try:
-            WebDriverWait(driver, 15).until(EC.presence_of_element_located(
-                (By.XPATH, "//*[normalize-space(text())='Фамилия']")))
-        except Exception:
-            pass
+            return False
+        if not click(driver, add_user_btn, "Добавить физ. лицо"):
+            log.error("Кнопка 'Добавить физ. лицо' не нажалась")
+            close_open_modals(driver)
+            return False
+        person_heading = _wait_visible_xpath(
+            driver, "//*[normalize-space(text())='Фамилия']", 15)
     except Exception as e:
         log.error(f"Шаг 4: {e}")
         close_open_modals(driver)
-        return
+        return False
 
     # ШАГ 5: Заполнить карточку
     log.info("[5/7] Заполнение карточки")
@@ -385,171 +517,617 @@ def create_correspondent(driver, person_name, kind="person"):
             ("Должность", "ЮЛ" if legal else "ФЛ", "outer_person_dialog-position-input"),
         ]
         for label_text, value, input_id in fields:
-            if address_only and label_text in ("Имя", "Отчество"):
-                log.info(f"  {label_text}: не заполняется (корреспондент-адрес)")
-                continue
+            field_element = _find_visible(driver, By.ID, input_id)
+            if not field_element:
+                log.error(f"Поле '{label_text}' карточки не найдено")
+                close_open_modals(driver)
+                return False
             result = driver.execute_script("""
-                var inputId = arguments[0]; var value = arguments[1];
-                var el = document.getElementById(inputId);
-                if (!el) {
-                    var base = inputId.replace('-input','');
-                    var container = document.getElementById(base);
-                    if (container) {
-                        var inputs = container.querySelectorAll('input[type="text"]');
-                        for (var i=0;i<inputs.length;i++)
-                            if (inputs[i].offsetParent!==null && !inputs[i].readOnly)
-                                { el=inputs[i]; break; }
-                    }
-                }
-                if (!el) return 'no-element';
+                var el = arguments[0]; var value = arguments[1];
+                if (!el || !el.isConnected || el.offsetParent === null) return 'no-element';
                 el.focus(); el.value = value;
                 el.dispatchEvent(new Event('input',{bubbles:true}));
                 el.dispatchEvent(new Event('change',{bubbles:true}));
                 return 'ok:'+el.id;
-            """, input_id, value)
-            log.info(f"  {label_text}: {value} [{result}]")
+            """, field_element, value)
+            shown_value = ("<пусто>" if not value else
+                           ("<адрес>" if address_only and label_text == "Фамилия"
+                            else value))
+            log.info(f"  {label_text}: {shown_value} [{result}]")
+            if not str(result or "").startswith("ok:"):
+                log.error(f"Поле '{label_text}' карточки не заполнилось")
+                close_open_modals(driver)
+                return False
 
         # Нажать "Добавить" в карточке
-        save_btn = None
-        try:
-            save_btn = driver.find_element(By.CSS_SELECTOR,
-                "[id*='Parton_person_dialog_save_button']")
-        except Exception:
-            btns = driver.find_elements(By.XPATH,
-                "//*[normalize-space(text())='Добавить']")
-            vis = [b for b in btns if b.is_displayed()]
-            if vis:
-                save_btn = vis[-1]
-        if save_btn:
-            click(driver, save_btn, "Сохранить карточку")
-            try:
-                WebDriverWait(driver, 15).until(EC.presence_of_element_located(
-                    (By.XPATH, "//*[contains(text(),'Выбрать физ')]")))
-            except Exception:
-                pass
+        save_btn = _find_visible(
+            driver,
+            By.CSS_SELECTOR,
+            "[id*='Parton_person_dialog_save_button']",
+        )
+        if not save_btn:
+            save_btn = _pick_topmost_visible(
+                driver,
+                driver.find_elements(
+                    By.XPATH, "//*[normalize-space(text())='Добавить']"),
+            )
+        if not save_btn:
+            log.error("Кнопка сохранения карточки корреспондента не найдена")
+            close_open_modals(driver)
+            return False
+        if not click(driver, save_btn, "Сохранить карточку"):
+            log.error("Карточка корреспондента не сохранилась")
+            close_open_modals(driver)
+            return False
+        _wait_visible_xpath(driver, "//*[contains(text(),'Выбрать физ')]", 15)
     except Exception as e:
         log.error(f"Шаг 5: {e}")
         close_open_modals(driver)
-        return
+        return False
 
     # ШАГ 6: 'Выбрать физ. лиц'
     log.info("[6/7] Выбрать физ. лиц")
     try:
-        select_btn = None
-        try:
-            select_btn = driver.find_element(By.CSS_SELECTOR,
-                "[id*='Parton_organization_dialog_select_persons_button']")
-        except Exception:
-            btns = driver.find_elements(By.XPATH,
-                "//*[contains(text(),'Выбрать физ')]")
-            vis = [b for b in btns if b.is_displayed()]
-            if vis:
-                select_btn = vis[0]
-        if select_btn:
-            click(driver, select_btn, "Выбрать физ. лиц")
-            try:
-                WebDriverWait(driver, 15).until(EC.presence_of_element_located(
-                    (By.ID, "oshs-select-button")))
-            except Exception:
-                pass
-        else:
+        select_btn = _find_visible(
+            driver,
+            By.CSS_SELECTOR,
+            "[id*='Parton_organization_dialog_select_persons_button']",
+        )
+        if not select_btn:
+            select_btn = _pick_topmost_visible(
+                driver,
+                driver.find_elements(By.XPATH, "//*[contains(text(),'Выбрать физ')]"),
+            )
+        if not select_btn:
             log.error("Кнопка 'Выбрать физ. лиц' не найдена")
             close_open_modals(driver)
-            return
+            return False
+        if not click(driver, select_btn, "Выбрать физ. лиц"):
+            log.error("Кнопка 'Выбрать физ. лиц' не нажалась")
+            close_open_modals(driver)
+            return False
+        WebDriverWait(driver, 15).until(
+            lambda d: _find_visible(d, By.ID, "oshs-select-button"))
     except Exception as e:
         log.error(f"Шаг 6: {e}")
         close_open_modals(driver)
-        return
+        return False
 
     # ШАГ 7: 'Готово'
     log.info("[7/7] Готово")
     try:
-        done_btn = None
-        try:
-            done_btn = driver.find_element(By.ID, "oshs-select-button")
-        except Exception:
-            btns = driver.find_elements(By.XPATH,
-                "//*[normalize-space(text())='Готово']")
-            vis = [b for b in btns if b.is_displayed()]
-            if vis:
-                done_btn = vis[0]
-        if done_btn:
-            click(driver, done_btn, "Готово")
-            from shared.ui import wait_modal_closed
-            wait_modal_closed(driver)
-            log.info(f"Корреспондент создан: {person_name}")
-        else:
+        done_btn = _find_visible(driver, By.ID, "oshs-select-button")
+        if not done_btn:
+            done_btn = _pick_topmost_visible(
+                driver,
+                driver.find_elements(
+                    By.XPATH, "//*[normalize-space(text())='Готово']"),
+            )
+        if not done_btn:
             log.error("Кнопка 'Готово' не найдена")
             close_open_modals(driver)
+            return False
+        if not click(driver, done_btn, "Готово"):
+            log.error("Кнопка 'Готово' не нажалась")
+            close_open_modals(driver)
+            return False
+        from shared.ui import wait_modal_closed
+        wait_modal_closed(driver)
+        selected = _wait_for_correspondent_value(
+            driver, person_name, kind=kind, timeout=5,
+            allow_closed_input=True, baseline_input="")
+        if selected:
+            log.info(f"Корреспондент создан и выбран: {shown_card_name}")
+            return True
+        log.error("Корреспондент создан, но исходное поле не подтвердило выбор")
+        return False
     except Exception as e:
         log.error(f"Шаг 7: {e}")
         close_open_modals(driver)
+        return False
 
 
-def _correspondent_field_value(driver):
-    """Читает текущее значение поля 'Корреспондент' (для пост-верификации)."""
+_READ_CORRESPONDENT_FIELD_JS = r"""
+const inp = arguments[0];
+if (!inp || !inp.isConnected) {
+    return {input_value: '', popup_visible: false, semantic_values: []};
+}
+const ir = inp.getBoundingClientRect();
+const values = [];
+const seen = new Set();
+
+function add(value) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!text || text === 'Корреспондент' || text.length > 500 || seen.has(text)) return;
+    seen.add(text);
+    values.push(text);
+}
+
+function visible(el) {
+    if (!el || !el.isConnected) return false;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' &&
+        style.visibility !== 'hidden' && parseFloat(style.opacity || '1') > 0.01;
+}
+
+function explicitPopupAncestor(el) {
+    let node = el;
+    for (let level = 0; level < 10 && node; level++, node = node.parentElement) {
+        const role = (node.getAttribute('role') || '').toLowerCase();
+        const cls = (node.className || '').toString();
+        if (role === 'option' || role === 'listbox' || role === 'menu' ||
+                /(popup|dropdown|boundlist|combo-list|listbox|menu-item|select-option)/i.test(cls)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function popupVisible() {
+    if ((inp.getAttribute('aria-expanded') || '').toLowerCase() === 'true') return true;
+    const linked = String(inp.getAttribute('aria-controls') ||
+        inp.getAttribute('aria-owns') || '').split(/\s+/).filter(Boolean);
+    for (const id of linked) {
+        if (visible(document.getElementById(id))) return true;
+    }
+    for (const el of document.querySelectorAll(
+            "[role='listbox'],[role='menu'],div,ul,ol,table")) {
+        if (!visible(el) || el.contains(inp)) continue;
+        const style = window.getComputedStyle(el);
+        const cls = (el.className || '').toString();
+        const role = (el.getAttribute('role') || '').toLowerCase();
+        const itemClass = /(boundlist-item|combo-list-item|menu-item|select-option|list-item)/i.test(cls);
+        const popupClass = !itemClass &&
+            (/(?:^|[\s_-])(popup|dropdown|boundlist|combo-list|listbox|popupmenu)(?:$|[\s_-])/i.test(cls) ||
+             /(PopupPanel|MenuPanel|BoundList|ComboList)/i.test(cls));
+        const positioned = style.position === 'absolute' || style.position === 'fixed';
+        const semantic = role === 'listbox' || role === 'menu' || popupClass;
+        if (!positioned && !semantic) continue;
+        const r = el.getBoundingClientRect();
+        const overlapPx = Math.max(0,
+            Math.min(r.right, ir.right) - Math.max(r.left, ir.left));
+        const overlapRatio = overlapPx / Math.max(1, Math.min(r.width, ir.width));
+        const widthRatio = r.width / Math.max(1, ir.width);
+        const belowGap = r.top - ir.bottom;
+        const aboveGap = ir.top - r.bottom;
+        const roomBelow = window.innerHeight - ir.bottom;
+        const directBelow = belowGap >= -8 && belowGap <= 96;
+        const directAbove = roomBelow < Math.max(120, Math.min(r.height, 300)) &&
+            aboveGap >= -8 && aboveGap <= 96;
+        const anchored = overlapRatio >= 0.55 && widthRatio >= 0.45 &&
+            widthRatio <= 2.5 && r.height >= 16 && (directBelow || directAbove);
+        const semanticNear = semantic && overlapRatio >= 0.35 &&
+            Math.min(Math.abs(belowGap), Math.abs(aboveGap)) <= 140;
+        const rootText = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+        const query = String(inp.value || '').replace(/\s+/g, ' ').trim();
+        const containsQuery = !!query && rootText.toLocaleLowerCase('ru-RU').includes(
+            query.toLocaleLowerCase('ru-RU'));
+        const saysEmpty = /(ничего\s+не\s+найдено|нет\s+(данных|результат)|совпадени\w*\s+не\s+найден\w*|запис\w*\s+не\s+найден\w*|данн\w*\s+отсутству\w*|no\s+(data|result))/i.test(rootText);
+        const loadingHint = el.getAttribute('aria-busy') === 'true' ||
+            !!el.querySelector("[aria-busy='true'],[class*='loading'],[class*='Loading']");
+        const nonsemanticPopupShape = anchored &&
+            (!rootText || containsQuery || saysEmpty || loadingHint) &&
+            (!el.querySelector('input,textarea,select') ||
+             containsQuery || saysEmpty || loadingHint);
+        if ((nonsemanticPopupShape || semanticNear) &&
+                !(r.width > window.innerWidth * 0.96 && r.height > window.innerHeight * 0.85)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// inp.value является либо поисковой строкой открытой выпадашки, либо итоговым
+// display-value после её закрытия. Python принимает его только во втором случае.
+for (const attr of ['data-value', 'data-display-value', 'data-selected-value']) {
+    add(inp.getAttribute(attr));
+}
+
+let root = inp.parentElement;
+for (let level = 0; level < 5 && root; level++, root = root.parentElement) {
+    for (const el of root.querySelectorAll(
+            "input, span, div, td, [data-value], [data-display-value]")) {
+        if (el === inp || !el.isConnected) continue;
+        if (explicitPopupAncestor(el)) continue;
+        if (el.tagName === 'INPUT') {
+            const type = (el.getAttribute('type') || '').toLowerCase();
+            const inputCls = (el.className || '').toString();
+            if (el.readOnly || el.disabled || type === 'hidden' ||
+                    /(chip|token|selected|display)/i.test(inputCls + ' ' + el.id)) {
+                add(el.value);
+            }
+        }
+        for (const attr of ['data-value', 'data-display-value', 'data-selected-value']) {
+            add(el.getAttribute(attr));
+        }
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        if (r.width <= 0 || r.height <= 0 || style.display === 'none' ||
+                style.visibility === 'hidden') continue;
+        const sameRow = r.bottom >= ir.top - 20 && r.top <= ir.bottom + 20;
+        const nearby = r.right >= ir.left - 80 && r.left <= ir.right + 220;
+        if (!sameRow || !nearby) continue;
+        const semanticHint = [el.className, el.id, el.getAttribute('role'),
+            el.getAttribute('data-marker')].filter(Boolean).join(' ');
+        if (/(chip|token|selected|selection|display-value|selected-value)/i.test(semanticHint)) {
+            add(el.textContent);
+        }
+    }
+}
+return {
+    input_value: String(inp.value || '').replace(/\s+/g, ' ').trim(),
+    popup_visible: popupVisible(),
+    semantic_values: values,
+};
+"""
+
+
+def _correspondent_field_state(driver):
+    """Возвращает model-bound state поля и текущее display-value."""
     try:
         inp = find_input_near_label(driver, "Корреспондент")
         if not inp:
-            return ""
-        val = (inp.get_attribute('value') or '').strip()
-        return val
+            return {
+                "input_value": "", "popup_visible": False,
+                "semantic_values": [], "semantic_value": "",
+            }
+        state = driver.execute_script(_READ_CORRESPONDENT_FIELD_JS, inp)
+        if isinstance(state, dict):
+            semantic = " | ".join(
+                str(value).strip()
+                for value in (state.get("semantic_values") or ())
+                if str(value).strip()
+            )
+            state = dict(state)
+            state["semantic_value"] = semantic
+            return state
+        # Backward compatibility for a legacy/mock driver.
+        value = str(state or "").strip()
+        return {
+            "input_value": value, "popup_visible": False,
+            "semantic_values": [value] if value else [],
+            "semantic_value": value,
+        }
     except Exception:
-        return ""
+        return {
+            "input_value": "", "popup_visible": False,
+            "semantic_values": [], "semantic_value": "",
+        }
+
+
+def _correspondent_field_value(driver):
+    """Читает только подтверждённое model-bound значение поля."""
+    return _correspondent_field_state(driver).get("semantic_value", "")
+
+
+def _correspondent_value_matches(value, expected, kind="person"):
+    if not value:
+        return False
+    if _is_legal_kind(kind) or _is_address_kind(kind):
+        return match_legal_correspondent(value, expected)
+    return match_strict(value, expected)
+
+
+def _wait_for_correspondent_value(driver, expected, kind="person", timeout=3,
+                                  allow_closed_input=False,
+                                  baseline_input=None):
+    """Поллит локальный state и возвращает подтверждённое значение.
+
+    ``input.value`` принимается только после клика по доказанному option и
+    закрытия его popup. В остальных местах поисковая строка не является
+    доказательством выбора модели.
+    """
+    attempts = max(1, int(timeout / 0.2))
+    for _ in range(attempts):
+        state = _correspondent_field_state(driver)
+        # An open popup can contain hover/selected-looking option classes;
+        # nothing is accepted until that popup has actually closed.
+        if state.get("popup_visible") is True:
+            time.sleep(0.2)
+            continue
+        # Keep the narrow value helper as a compatibility/test hook.
+        value = _correspondent_field_value(driver)
+        if _correspondent_value_matches(value, expected, kind):
+            return value
+        if allow_closed_input and state.get("popup_visible") is False:
+            value = str(state.get("input_value") or "").strip()
+            baseline_changed = (
+                baseline_input is not None and
+                _norm_no_space(value) != _norm_no_space(str(baseline_input))
+            )
+            if (baseline_changed and
+                    _correspondent_value_matches(value, expected, kind)):
+                return value
+        time.sleep(0.2)
+    return ""
+
+
+_OPTION_ANCESTOR_JS = r"""
+let el = arguments[0];
+let genericItem = null;
+for (let level = 0; level < 8 && el; level++, el = el.parentElement) {
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const cls = (el.className || '').toString();
+    if (role === 'option' ||
+        /(?:^|[\s_-])(option|menu-item|select-option|combo-item|boundlist-item|list-item)(?:$|[\s_-])/i.test(cls) ||
+        /gxt-\w*item|x-combo-list-item|x-boundlist-item|ListItem|SelectItem/i.test(cls)) {
+        return el;
+    }
+    if (!genericItem && /(?:^|[\s_-])item(?:$|[\s_-])/i.test(cls)) {
+        genericItem = el;
+    }
+    if (genericItem && (role === 'listbox' || role === 'menu' ||
+            /(popup|dropdown|boundlist|combo-list|menu|listbox)/i.test(cls))) {
+        return genericItem;
+    }
+}
+return null;
+"""
+
+def _option_ancestor(driver, element):
+    """Возвращает реальный option-контейнер или None для текста карточки."""
+    try:
+        return driver.execute_script(_OPTION_ANCESTOR_JS, element)
+    except Exception:
+        return None
+
+
+_CLEAR_QUERY_BEFORE_OPTION_CLICK_JS = r"""
+const inp = arguments[0], option = arguments[1];
+if (!inp || !inp.isConnected || !option || !option.isConnected) return false;
+const r = option.getBoundingClientRect();
+const style = window.getComputedStyle(option);
+if (r.width <= 0 || r.height <= 0 || style.display === 'none' ||
+        style.visibility === 'hidden') return false;
+// Do not dispatch input/change: the already rendered option and GXT's query
+// model stay intact. A real option selection writes the display value back;
+// merely closing/redrawing the popup leaves this raw field empty.
+const descriptor = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype, 'value');
+if (descriptor && descriptor.set) descriptor.set.call(inp, '');
+else inp.value = '';
+return inp.value === '' && option.isConnected;
+"""
+
+
+def _clear_query_before_option_click(driver, input_element, option_element):
+    """Creates a before/after signal without re-filtering the open popup."""
+    try:
+        return bool(driver.execute_script(
+            _CLEAR_QUERY_BEFORE_OPTION_CLICK_JS,
+            input_element,
+            option_element,
+        ))
+    except Exception:
+        return False
 
 
 def fill_correspondent_field(driver, person_name, kind="person"):
-    """Заполняет поле Корреспондент через combobox.
-    Если не найден по инициалам — создаёт нового.
-    Пост-верификация: после клика проверяет что поле реально заполнилось;
-    иначе падает в create_correspondent."""
+    """Выбирает существующего или создаёт нового корреспондента.
+
+    Возвращает True только когда значение исходного поля подтверждено.
+    """
+    person_name = " ".join(str(person_name or "").split())
+    if not person_name:
+        log.error("Пустое значение корреспондента")
+        return False
+
     legal = _is_legal_kind(kind)
     address_only = _is_address_kind(kind)
     kind_label = "ЮЛ" if legal else ("АДРЕС" if address_only else "ФЛ")
-    log.info(f"Корреспондент ({kind_label}): {person_name}")
+    shown_name = "<адрес>" if address_only else person_name
+    log.info(f"Корреспондент ({kind_label}): {shown_name}")
     time.sleep(1)
 
     inp = find_input_near_label(driver, "Корреспондент")
     if not inp:
         log.warning("Поле корреспондента не найдено")
-        return
+        return False
 
-    surname = person_name.split()[0]
     exact_name = legal or address_only
-    search_value = person_name if exact_name else surname
+    search_value = person_name if exact_name else person_name.split()[0]
     initials = person_name if exact_name else fio_to_initials(person_name)
 
     inp.click()
     # Combobox-autocomplete: JS-set + dispatch events открывают выпадашку
     js_type_combobox(driver, inp, search_value)
-    log.info(f"Введён поиск (JS): {search_value}")
+    log.info(f"Введён поиск (JS): {shown_name}")
 
-    all_results = []
+    all_results = None
+    lookup_error = None
+    empty_since = None
+    empty_samples = 0
+    empty_key = None
+    empty_signature = None
+    result_since = None
+    result_samples = 0
+    result_key = None
+    result_signature = None
+    lookup_completed = False
+    lookup_timeout = 10 if address_only else 5
+    lookup_started = time.monotonic()
+
+    def _lookup_ready(d):
+        nonlocal all_results, empty_since, empty_samples, empty_key
+        nonlocal empty_signature, result_since, result_samples, result_key
+        nonlocal result_signature, lookup_completed
+        all_results = find_dropdown_options(d, search_value, inp)
+        popup_seen = getattr(all_results, "popup_seen", None)
+        if popup_seen is not None:
+            now = time.monotonic()
+            popup_key = getattr(all_results, "popup_key", None)
+            signature = getattr(all_results, "signature", None)
+            reported_input = getattr(all_results, "input_value", "")
+            input_observed = getattr(all_results, "input_observed", False)
+            input_ok = (not input_observed or
+                        _norm_keep_space(reported_input) ==
+                        _norm_keep_space(search_value))
+            if not popup_seen:
+                empty_since = None
+                empty_samples = 0
+                empty_key = None
+                empty_signature = None
+                result_since = None
+                result_samples = 0
+                result_key = None
+                result_signature = None
+                return False
+            if getattr(all_results, "loading", False):
+                empty_since = None
+                empty_samples = 0
+                empty_key = None
+                empty_signature = None
+                result_since = None
+                result_samples = 0
+                result_key = None
+                result_signature = None
+                return False
+            if not input_ok:
+                empty_since = None
+                empty_samples = 0
+                empty_key = None
+                empty_signature = None
+                result_since = None
+                result_samples = 0
+                result_key = None
+                result_signature = None
+                return False
+            if all_results:
+                empty_since = None
+                empty_samples = 0
+                state_key = popup_key or signature
+                if (state_key != result_key or
+                        signature != result_signature):
+                    result_key = state_key
+                    result_signature = signature
+                    result_since = now
+                    result_samples = 1
+                else:
+                    result_samples += 1
+                # A freshly opened GXT list may briefly contain rows for the
+                # clear/previous query. Require two identical observations.
+                if popup_key is None and signature is None:
+                    lookup_completed = True  # browserless/legacy tests
+                elif (result_samples >= 2 and result_since is not None and
+                      now - result_since >= 0.8):
+                    lookup_completed = True
+                return lookup_completed
+
+            result_since = None
+            result_samples = 0
+            state_key = popup_key or signature
+            if state_key != empty_key or signature != empty_signature:
+                empty_key = state_key
+                empty_signature = signature
+                empty_since = now
+                empty_samples = 1
+            else:
+                empty_samples += 1
+
+            if getattr(all_results, "empty_explicit", False):
+                if popup_key is None and signature is None:
+                    lookup_completed = True  # browserless/legacy tests
+                elif (empty_samples >= 2 and empty_since is not None and
+                      now - empty_since >= 0.8):
+                    lookup_completed = True
+                return lookup_completed
+
+            # A blank, strictly anchored popup is a valid zero-result state
+            # only after it stayed unchanged for practically the whole lookup
+            # window. This permits a new feedback address while preventing a
+            # transient network/loading blank from creating a duplicate.
+            if (getattr(all_results, "root_blank", False) and
+                    state_key is not None and empty_samples >= 4 and
+                    empty_since is not None and now - empty_since >= 2.0 and
+                    now - lookup_started >= lookup_timeout - 0.75):
+                lookup_completed = True
+                return True
+            return False
+        # Unit/legacy compatibility: a successful empty list means a completed
+        # empty lookup; non-empty unscoped nodes still require validation below.
+        lookup_completed = True
+        return True
+
     try:
-        WebDriverWait(driver, 5).until(
-            lambda d: len(find_dropdown_options(d, search_value, inp)) > 0)
-        all_results = find_dropdown_options(driver, search_value, inp)
-    except Exception:
-        from selenium.webdriver.common.keys import Keys as _Keys
+        WebDriverWait(driver, lookup_timeout).until(_lookup_ready)
+    except Exception as exc:
+        lookup_error = exc
         try:
-            inp.send_keys(_Keys.ENTER)
-            WebDriverWait(driver, 3).until(
-                lambda d: len(find_dropdown_options(d, search_value, inp)) > 0)
-            all_results = find_dropdown_options(driver, search_value, inp)
-        except Exception:
-            pass
+            # One final sample may cross the stability threshold at timeout;
+            # it must pass the same rules as every earlier poll.
+            _lookup_ready(driver)
+        except Exception as final_exc:
+            lookup_error = final_exc
+            all_results = None
 
-    log.info(f"Кандидатов: {len(all_results)} (ищем '{initials}')")
+    if all_results is None:
+        log.error(f"Не удалось определить popup корреспондента: {lookup_error}")
+        return False
+
+    if not lookup_completed:
+        log.error(
+            "Поиск корреспондента не завершился (popup отсутствует/загружается) — "
+            "создание отменено во избежание дубля"
+        )
+        return False
+
+    popup_seen = getattr(all_results, "popup_seen", None)
+    legacy_lookup = popup_seen is None
+    scoped_options = bool(getattr(all_results, "scoped", False))
+    if popup_seen is None:
+        # Plain list exists only in compatibility/tests. Empty is an explicit
+        # completed result; matching page nodes are an unknown unsafe state.
+        popup_seen = not bool(all_results)
+
+    if not popup_seen and not all_results:
+        log.error("Popup корреспондента не распознан — создание отменено во избежание дубля")
+        return False
+
+    # Защитный фильтр поверх find_dropdown_options: текст карточки документа
+    # не является вариантом, даже если содержит тот же адрес/ФИО.
+    option_results = []
+    seen_options = set()
+    for result in all_results:
+        option = result if scoped_options else _option_ancestor(driver, result)
+        if option is None:
+            continue
+        key = getattr(option, "id", None) or id(option)
+        if key in seen_options:
+            continue
+        seen_options.add(key)
+        option_results.append((result, option))
+
+    log.info(f"Вариантов справочника: {len(option_results)}")
+
+    if legacy_lookup and option_results:
+        # A real option ancestor is sufficient evidence for legacy list-only
+        # drivers; production uses the explicit popup_seen state.
+        popup_seen = True
+
+    if all_results and not option_results:
+        log.error(
+            "Popup не подтверждён: совпадения оказались элементами карточки, "
+            "создание отменено во избежание дубля"
+        )
+        return False
+
+    if not popup_seen:
+        log.error("Popup корреспондента не подтверждён — создание отменено")
+        return False
 
     # Строгий матч по инициалам
     target = None
+    target_option = None
     target_desc = ""
-    for idx, r in enumerate(all_results, 1):
+    option_read_error = False
+    for idx, (r, option) in enumerate(option_results, 1):
         try:
-            raw = r.text
+            raw = (getattr(option, "text", None) or r.text or "")
             ok = (match_legal_correspondent(raw, person_name) if exact_name
                   else match_strict(raw, person_name))
-            preview = raw.strip().replace('\n', ' ')[:80]
+            preview = ("<адрес скрыт>" if address_only
+                       else raw.strip().replace('\n', ' ')[:80])
             # Логируем tag + class для диагностики что именно за элемент
             try:
                 tag = r.tag_name
@@ -560,111 +1138,89 @@ def fill_correspondent_field(driver, person_name, kind="person"):
             log.info(f"  [{idx}] {'OK' if ok else '--'} <{meta}> | {preview!r}")
             if ok and target is None:
                 target = r
+                target_option = option
                 target_desc = f"[{idx}] <{meta}> {preview!r}"
         except Exception as e:
+            option_read_error = True
             log.info(f"  [{idx}] ERR читаю text: {e}")
             continue
 
     if target:
-        from selenium.webdriver.common.action_chains import ActionChains as _AC
-        from selenium.webdriver.common.keys import Keys as _Keys
         try:
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", target)
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});", target_option)
         except Exception:
             pass
 
-        def _try_click_target(el, strategy):
-            try:
-                if strategy == 'ac':
-                    _AC(driver).move_to_element(el).pause(0.2).click().perform()
-                elif strategy == 'js':
-                    driver.execute_script("arguments[0].click();", el)
-                elif strategy == 'enter':
-                    inp.send_keys(_Keys.ENTER)
-                return True
-            except Exception:
-                return False
+        raw_query_cleared = _clear_query_before_option_click(
+            driver, inp, target_option)
+        click_ok = cdp_click(driver, target_option)
+        selected = (_wait_for_correspondent_value(
+            driver, person_name, kind=kind, timeout=3,
+            allow_closed_input=raw_query_cleared,
+            baseline_input="" if raw_query_cleared else None) if click_ok else "")
+        if selected:
+            log.info(f"Корреспондент выбран из справочника: {shown_name}")
+            return True
 
-        def _check(timeout_iters=5):
-            """Поллинг поля. По дефолту 1s (5 × 0.2s) — быстрая проверка.
-            В новой версии АСУД value часто хранится не в input.value а в
-            chip-узле; если поле пустое после клика это не обязательно
-            означает что клик не сработал. Trust-mode в caller'е."""
-            for _ in range(timeout_iters):
-                time.sleep(0.2)
-                val = _correspondent_field_value(driver)
-                if val and (match_legal_correspondent(val, person_name) if exact_name
-                            else surname.lower() in val.lower()):
-                    return val
-            return None
-
-        # Найти родительский option-контейнер ПЕРЕД click-стратегиями.
-        # GXT часто рендерит option как <div role='option'><span>имя</span><span> - </span>...</div>
-        # — handler на div, а наш XPath нашёл внутренний <span>. Клик по span'у
-        # ничего не даёт; нужен сам option.
-        parent_option = None
+        # Повторный клик по тому же реальному option — страховка для CDP.
         try:
-            parent_option = driver.execute_script("""
-                let el = arguments[0];
-                for (let i = 0; i < 6 && el; i++) {
-                    el = el.parentElement;
-                    if (!el) break;
-                    const role = el.getAttribute('role');
-                    const cls = (el.className || '').toString().toLowerCase();
-                    // Расширенный список классов GXT/Sencha widget'ов:
-                    // option/item/menu-item/select-option — общие
-                    // gxt-/x-combo/x-boundlist — Sencha-специфичные
-                    // ListItem/SelectItem — типичные именования виджетов
-                    if (role === 'option' ||
-                        /\\b(option|item|menu-item|select-option|combo-item|boundlist-item|ListItem|SelectItem)\\b/i.test(cls) ||
-                        /gxt-\\w*item|x-combo-list-item|x-boundlist-item/i.test(cls)) {
-                        return el;
-                    }
-                }
-                return null;
-            """, target)
+            ActionChains(driver).move_to_element(
+                target_option).pause(0.2).click().perform()
         except Exception:
             pass
-        if parent_option is not None:
-            log.debug(f"Найден parent-option, делаю trusted-click по нему")
+        selected = _wait_for_correspondent_value(
+            driver, person_name, kind=kind, timeout=2,
+            allow_closed_input=raw_query_cleared,
+            baseline_input="" if raw_query_cleared else None)
+        if selected:
+            log.info(f"Корреспондент выбран из справочника (повтор): {shown_name}")
+            return True
 
-        # TRUST-MODE: делаем один CDP-click и доверяем визуальному результату.
-        # Раньше пробовали 4 стратегии + create-new fallback (16+ секунд на
-        # документ). В новой АСУД клик визуально срабатывает, просто value
-        # хранится не в input.value — наш polling его не видит, а UI заполнен.
-        cdp_target = parent_option if parent_option is not None else target
-        log.debug(f"CDP trusted-click по {'parent-option' if parent_option else 'target'}")
-        click_ok = cdp_click(driver, cdp_target)
-        val = _check() if click_ok else None
-        if val:
-            log.info(f"Корреспондент выбран (CDP, value виден): {person_name} (поле: {val!r})")
-            return
-        if click_ok:
-            log.info(f"Корреспондент: CDP-click отправлен, value в input не виден — "
-                     f"доверяем (вероятно value в chip-узле)")
-            return
+        # Запись уже существует: создание новой породит дубль. Останавливаем
+        # документ и даём daemon повторить его после восстановления страницы.
+        log.error(
+            f"Корреспондент {target_desc} найден, но выбор не подтверждён")
+        return False
 
-        # CDP-click сам не сработал (rare) — fallback ActionChains
-        log.debug("CDP не сработал, fallback ActionChains")
-        _try_click_target(target, 'ac')
-        val = _check()
-        if val:
-            log.info(f"Корреспондент выбран (AC fallback): {person_name} (поле: {val!r})")
-            return
-
-        # Совсем никак — ASUD-state скорее всего сломан, но НЕ падаем в
-        # create_correspondent (он у нас всё равно не работает — кнопка '+'
-        # не найдена). Просто warning и идём дальше.
-        log.warning(f"Корреспондент {target_desc}: не подтверждён, но идём дальше "
-                    f"(возможно value в chip-узле, регистрация попробует сохранить)")
-        return
+    if option_read_error:
+        log.error(
+            "Список корреспондентов перерисовался во время чтения — "
+            "создание отменено во избежание дубля"
+        )
+        return False
 
     # Нет совпадения — создаём нового
-    log.info(f"'{initials}' не найден — создаю нового")
+    shown_initials = "<адрес>" if address_only else initials
+    log.info(f"'{shown_initials}' не найден — создаю нового")
     from selenium.webdriver.common.keys import Keys as _Keys
+    input_cleared = False
     try:
         inp.send_keys(_Keys.ESCAPE)
         time.sleep(0.5)
+        input_cleared = bool(driver.execute_script("""
+            const el = arguments[0];
+            if (el && el.isConnected) {
+                el.value = '';
+                el.dispatchEvent(new Event('input', {bubbles:true}));
+                el.dispatchEvent(new Event('change', {bubbles:true}));
+                return el.value === '';
+            }
+            return false;
+        """, inp))
     except Exception:
-        pass
-    create_correspondent(driver, person_name, kind=kind)
+        input_cleared = False
+    if not input_cleared:
+        log.error("Поле Корреспондент не очистилось перед созданием")
+        return False
+    created = create_correspondent(driver, person_name, kind=kind)
+    if not created:
+        log.error("Новый корреспондент не создан или не выбран")
+        return False
+    selected = _wait_for_correspondent_value(
+        driver, person_name, kind=kind, timeout=2,
+        allow_closed_input=True, baseline_input="")
+    if not selected:
+        log.error("После создания поле Корреспондент осталось неподтверждённым")
+        return False
+    return True
