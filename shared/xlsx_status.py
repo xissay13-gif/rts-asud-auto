@@ -20,6 +20,7 @@ from datetime import date
 import openpyxl
 
 from shared.xlsx_lock import xlsx_lock
+from shared.xlsx_format import format_registry_before_save, format_registry_row
 
 log = logging.getLogger("asud")
 
@@ -118,10 +119,12 @@ def _mark_status_locked(xlsx_path, asud_id, column_name, value):
             wb.close()
             return False
         # Колонка статуса — есть в шапке? иначе добавляем
+        added_status_column = False
         try:
             status_col = headers.index(column_name)
         except ValueError:
             status_col = len(headers)
+            added_status_column = True
             ws.cell(row=1, column=status_col + 1).value = column_name
             ws.cell(row=1, column=status_col + 1).font = openpyxl.styles.Font(bold=True)
             ws.column_dimensions[
@@ -139,6 +142,9 @@ def _mark_status_locked(xlsx_path, asud_id, column_name, value):
             wb.close()
             return False
         ws.cell(row=target_row, column=status_col + 1).value = value
+        format_registry_before_save(ws, xlsx_path, changed_row=target_row)
+        if added_status_column:
+            format_registry_row(ws, 1)
         wb.save(xlsx_path)
         wb.close()
         return True

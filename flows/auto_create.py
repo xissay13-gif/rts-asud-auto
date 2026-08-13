@@ -36,6 +36,7 @@ from shared.ui import (click, wait_and_click, find_input_near_label,
                 set_driver_timeout)
 from shared.correspondent import (fill_correspondent_field, match_correspondent)
 from shared.attachments import get_dummy_msg, attach_content
+from shared.xlsx_format import format_registry_before_save
 
 
 # ================= LOGGING =================
@@ -702,6 +703,7 @@ def _ensure_output_xlsx(path):
             ws.column_dimensions[
                 openpyxl.utils.get_column_letter(col)].width = w
         ws.freeze_panes = "A2"
+        format_registry_before_save(ws, path, changed_row=1)
         wb.save(path)
     except Exception as e:
         log.warning(f"Не удалось создать {path}: {e}")
@@ -726,6 +728,7 @@ def _append_output_row(path, doc_data, asud_id):
         wb = openpyxl.load_workbook(path)
         ws = wb.active
         ws.append([asud_id or "", okrug or "", fio or "", ""])
+        format_registry_before_save(ws, path, changed_row=ws.max_row)
         wb.save(path)
         wb.close()
         log.info(f"  → {os.path.basename(path)}: "

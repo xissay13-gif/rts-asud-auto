@@ -39,6 +39,7 @@ from shared.classifier import classify_doc_type
 from shared.zhkh_parser import parse_zhkh_body
 from shared.feedback_parser import parse_feedback_body
 from shared.xlsx_lock import xlsx_lock
+from shared.xlsx_format import format_registry_before_save
 
 # Переиспользуем создание/регистрацию/output из mix
 from flows import mix as mix_flow
@@ -247,7 +248,7 @@ def _safe_field(msg, attr, msg_path, prop_id):
 _REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body",
                      "Дата получения", "Планируемая дата", "Статус",
                      "Отписано Халецкой", "Отписано в округ"]
-_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 80, 6: 16, 7: 16, 8: 28,
+_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 60, 6: 16, 7: 16, 8: 28,
                     9: 18, 10: 18}
 
 
@@ -298,6 +299,7 @@ def _ensure_dated_xlsx(path):
             ws.column_dimensions[
                 openpyxl.utils.get_column_letter(col)].width = w
         ws.freeze_panes = "A2"
+        format_registry_before_save(ws, path, changed_row=1)
         wb.save(path)
     except Exception as e:
         log.warning(f"Не удалось создать {path}: {e}")
@@ -350,6 +352,7 @@ def _append_dated_row(path, doc, asud_id, status="OK"):
             headers = [str(c.value or '').strip() for c in next(ws.iter_rows(max_row=1))]
             row = [values.get(h, "") for h in headers]
             ws.append(row)
+            format_registry_before_save(ws, path, changed_row=ws.max_row)
             wb.save(path)
     except Exception as e:
         log.warning(f"Не удалось записать строку в {path}: {e}")
