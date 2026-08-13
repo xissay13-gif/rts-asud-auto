@@ -253,6 +253,16 @@ def main():
         if preset.get("delete_after_done"):
             os.environ['ASUD_DELETE_AFTER_DONE'] = '1'
 
+    # === ZHKH-DAEMON (непрерывный второй проход) ============================
+    # Этот режим не использует обычный источник (xlsx/email/sbis), поэтому
+    # запускаем его до интерактивного меню выбора источника.
+    if args.mode == 'zhkh-daemon':
+        log.info("Режим: zhkh-daemon (мониторинг реестров под Басмановым)")
+        os.environ['ASUD_MODE'] = 'zhkh-daemon'
+        from flows.zhkh_daemon import main as flow_main
+        flow_main()
+        return
+
     # === Определяем источник: sbis vs email vs xlsx ==========================
     if args.mode == 'sbis':
         source = 'sbis'
@@ -268,14 +278,6 @@ def main():
     else:
         # Ничего не указано — спрашиваем
         source = pick_source()
-
-    # === ZHKH-DAEMON (непрерывный второй проход) ============================
-    if args.mode == 'zhkh-daemon':
-        log.info("Режим: zhkh-daemon (мониторинг реестров под Басмановым)")
-        os.environ['ASUD_MODE'] = 'zhkh-daemon'
-        from flows.zhkh_daemon import main as flow_main
-        flow_main()
-        return
 
     # === СБИС-источник ======================================================
     if source == 'sbis':
