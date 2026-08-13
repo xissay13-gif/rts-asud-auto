@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException
 
 from shared import correspondent
 from shared.ui import DropdownOptions
@@ -83,16 +83,35 @@ class _Driver:
 class CorrespondentFieldConfirmationTests(unittest.TestCase):
     def _read_state(self, state):
         driver = _Driver()
-        driver.execute_script = Mock(return_value=state)
+        driver.execute_script = Mock(side_effect=lambda script, *_args: (
+            [] if script == correspondent._READ_COMMITTED_CORRESPONDENT_JS
+            else state
+        ))
         inp = _Input()
         with patch.object(
             correspondent, "find_input_near_label", return_value=inp
         ):
             value = correspondent._correspondent_field_value(driver)
-        driver.execute_script.assert_called_once_with(
+        driver.execute_script.assert_any_call(
+            correspondent._READ_COMMITTED_CORRESPONDENT_JS, "Корреспондент"
+        )
+        driver.execute_script.assert_any_call(
             correspondent._READ_CORRESPONDENT_FIELD_JS, inp
         )
         return value
+
+    def test_committed_row_is_read_when_editable_input_was_replaced(self):
+        driver = _Driver()
+        driver.execute_script = Mock(return_value=[FIO])
+
+        with patch.object(
+            correspondent, "find_input_near_label", return_value=None
+        ):
+            state = correspondent._correspondent_field_state(driver)
+
+        self.assertEqual(state["semantic_values"], [FIO])
+        self.assertEqual(state["semantic_value"], FIO)
+        self.assertEqual(state["input_value"], "")
 
     def test_plain_input_equal_to_expected_is_not_selected_while_popup_is_visible(self):
         value = self._read_state({
@@ -191,6 +210,15 @@ class CorrespondentFieldConfirmationTests(unittest.TestCase):
 class CorrespondentSelectionTests(unittest.TestCase):
     def _patch_flow(self, *, driver, candidates, field_value, create_result):
         inp = _Input()
+        def field_state(*_args, **_kwargs):
+            value = (field_value(*_args, **_kwargs)
+                     if callable(field_value) else field_value)
+            return {
+                "input_value": "",
+                "popup_visible": False,
+                "semantic_values": [value] if value else [],
+                "semantic_value": value or "",
+            }
         create_patch = (
             patch.object(correspondent, "create_correspondent", side_effect=create_result)
             if callable(create_result)
@@ -203,13 +231,82 @@ class CorrespondentSelectionTests(unittest.TestCase):
             patch.object(correspondent, "find_input_near_label", return_value=inp),
             patch.object(correspondent, "js_type_combobox", return_value=None),
             patch.object(correspondent, "find_dropdown_options", return_value=candidates),
-            patch.object(correspondent, "_correspondent_field_value", side_effect=field_value),
+            patch.object(correspondent, "_correspondent_field_state", side_effect=field_state),
             patch.object(
                 correspondent, "_clear_query_before_option_click", return_value=True
             ),
             patch.object(correspondent, "cdp_click", return_value=True),
             create_patch,
         )
+
+    def test_committed_exact_row_finishes_without_clicking_hidden_input(self):
+        driver = object()
+
+        with (
+            patch.object(correspondent.time, "sleep", return_value=None),
+            patch.object(
+                correspondent, "_committed_correspondent_values",
+                return_value=[FIO],
+            ),
+            patch.object(
+                correspondent, "find_input_near_label"
+            ) as input_mock,
+            patch.object(correspondent, "create_correspondent") as create_mock,
+        ):
+            result = correspondent.fill_correspondent_field(
+                driver, FIO, kind="person"
+            )
+
+        self.assertIs(result, True)
+        input_mock.assert_not_called()
+        create_mock.assert_not_called()
+
+    def test_different_committed_row_fails_closed_without_replacing_it(self):
+        driver = object()
+
+        with (
+            patch.object(correspondent.time, "sleep", return_value=None),
+            patch.object(
+                correspondent, "_committed_correspondent_values",
+                return_value=["Петров П П"],
+            ),
+            patch.object(
+                correspondent, "find_input_near_label"
+            ) as input_mock,
+            patch.object(correspondent, "create_correspondent") as create_mock,
+        ):
+            result = correspondent.fill_correspondent_field(
+                driver, FIO, kind="person"
+            )
+
+        self.assertIs(result, False)
+        input_mock.assert_not_called()
+        create_mock.assert_not_called()
+
+    def test_intercepted_editor_click_accepts_row_committed_during_rerender(self):
+        driver = object()
+        inp = _Input()
+        inp.click = Mock(side_effect=ElementClickInterceptedException("GXT rerender"))
+
+        with (
+            patch.object(correspondent.time, "sleep", return_value=None),
+            patch.object(
+                correspondent, "_committed_correspondent_values",
+                side_effect=[[], [FIO]],
+            ),
+            patch.object(
+                correspondent, "find_input_near_label", return_value=inp
+            ),
+            patch.object(correspondent, "js_type_combobox") as type_mock,
+            patch.object(correspondent, "create_correspondent") as create_mock,
+        ):
+            result = correspondent.fill_correspondent_field(
+                driver, FIO, kind="person"
+            )
+
+        self.assertIs(result, True)
+        type_mock.assert_not_called()
+        create_mock.assert_not_called()
 
     def test_address_text_from_document_card_does_not_trigger_creation(self):
         """Unscoped matching text is unknown popup state, not an empty lookup."""

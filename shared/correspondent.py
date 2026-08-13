@@ -14,6 +14,11 @@ correspondent.py — Создание нового корреспондента 
 import re
 import time
 import logging
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    ElementNotInteractableException,
+    StaleElementReferenceException,
+)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
@@ -655,6 +660,108 @@ def create_correspondent(driver, person_name, kind="person"):
         return False
 
 
+_READ_COMMITTED_CORRESPONDENT_JS = r"""
+const labelText = arguments[0];
+const xp = `//*[normalize-space(text())='${labelText}']`;
+const snap = document.evaluate(xp, document, null,
+    XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+
+function visible(el) {
+    if (!el || !el.isConnected) return false;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' &&
+        style.visibility !== 'hidden' && parseFloat(style.opacity || '1') > 0.01;
+}
+
+function rowText(row) {
+    const clone = row.cloneNode(true);
+    for (const node of clone.querySelectorAll(
+            "[class*='delBtnTd'],button,input,textarea,select")) {
+        node.remove();
+    }
+    return String(clone.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+function serviceInput(inp) {
+    if (!inp || !inp.isConnected) return false;
+    const rect = inp.getBoundingClientRect();
+    const style = window.getComputedStyle(inp);
+    return (inp.getAttribute('aria-hidden') || '').toLowerCase() === 'true' ||
+        rect.width < 4 || rect.height < 4 ||
+        parseFloat(style.opacity || '1') <= 0.05 ||
+        parseInt(style.zIndex || '0', 10) < 0;
+}
+
+function verticalGap(a, b) {
+    return Math.max(0, a.top - b.bottom, b.top - a.bottom);
+}
+
+for (let i = 0; i < snap.snapshotLength; i++) {
+    const label = snap.snapshotItem(i);
+    if (!visible(label)) continue;
+    const lr = label.getBoundingClientRect();
+    let root = label;
+    for (let level = 1; level <= 7; level++) {
+        root = root.parentElement;
+        if (!root) break;
+        const values = [];
+        const seenRows = new Set();
+        // GXT replaces a selected combobox editor with a row whose delete
+        // cell has *delBtnTd*. Its transparent 1x1 focus sink remains exactly
+        // under that row (this is also what Edge reports as intercepted).
+        for (const sink of root.querySelectorAll('input')) {
+            if (!serviceInput(sink)) continue;
+            const sr = sink.getBoundingClientRect();
+            // The label, focus sink and committed row are one horizontal GXT
+            // field. Do not borrow a selected row from the next form field.
+            if (sr.right < lr.left - 20) continue;
+            const x = sr.left + sr.width / 2;
+            const y = sr.top + sr.height / 2;
+            const hit = (x >= 0 && x < window.innerWidth &&
+                         y >= 0 && y < window.innerHeight)
+                ? document.elementFromPoint(x, y) : null;
+            const row = (hit && hit.closest('tr')) || sink.closest('tr');
+            if (!row || !root.contains(row) || !visible(row) ||
+                    seenRows.has(row) ||
+                    !row.querySelector("td[class*='delBtnTd']")) continue;
+            const rr = row.getBoundingClientRect();
+            const sinkInsideRow = x >= rr.left - 4 && x <= rr.right + 4 &&
+                y >= rr.top - 4 && y <= rr.bottom + 4;
+            const horizontalOverlap = Math.max(0,
+                Math.min(rr.right, lr.right) - Math.max(rr.left, lr.left));
+            const inlineRight = rr.left >= lr.right - 30;
+            const stackedBelow = horizontalOverlap >= 30;
+            if (!sinkInsideRow || verticalGap(lr, rr) > 12 ||
+                    (!inlineRight && !stackedBelow)) continue;
+            seenRows.add(row);
+            const text = rowText(row);
+            if (text && text !== labelText && text.length <= 500) values.push(text);
+        }
+        // Stop at the nearest field container. Ascending farther could mix
+        // Корреспондент with unrelated selected rows such as Адресаты.
+        if (values.length) return values;
+    }
+}
+return [];
+"""
+
+
+def _committed_correspondent_values(driver):
+    """Reads selected GXT rows independently from the hidden focus input."""
+    try:
+        values = driver.execute_script(
+            _READ_COMMITTED_CORRESPONDENT_JS, "Корреспондент")
+    except Exception:
+        return []
+    if not isinstance(values, (list, tuple)):
+        return []
+    return [
+        str(value).strip() for value in values
+        if str(value).strip()
+    ]
+
+
 _READ_CORRESPONDENT_FIELD_JS = r"""
 const inp = arguments[0];
 if (!inp || !inp.isConnected) {
@@ -794,20 +901,27 @@ return {
 def _correspondent_field_state(driver):
     """Возвращает model-bound state поля и текущее display-value."""
     try:
+        committed = _committed_correspondent_values(driver)
         inp = find_input_near_label(driver, "Корреспондент")
         if not inp:
+            semantic = " | ".join(committed)
             return {
                 "input_value": "", "popup_visible": False,
-                "semantic_values": [], "semantic_value": "",
+                "semantic_values": committed, "semantic_value": semantic,
             }
         state = driver.execute_script(_READ_CORRESPONDENT_FIELD_JS, inp)
         if isinstance(state, dict):
+            semantic_values = list(state.get("semantic_values") or ())
+            for value in committed:
+                if value not in semantic_values:
+                    semantic_values.append(value)
             semantic = " | ".join(
                 str(value).strip()
-                for value in (state.get("semantic_values") or ())
+                for value in semantic_values
                 if str(value).strip()
             )
             state = dict(state)
+            state["semantic_values"] = semantic_values
             state["semantic_value"] = semantic
             return state
         # Backward compatibility for a legacy/mock driver.
@@ -854,8 +968,9 @@ def _wait_for_correspondent_value(driver, expected, kind="person", timeout=3,
         if state.get("popup_visible") is True:
             time.sleep(0.2)
             continue
-        # Keep the narrow value helper as a compatibility/test hook.
-        value = _correspondent_field_value(driver)
+        # Use this same DOM snapshot. Reading the field twice races with GXT
+        # replacing its editor by the committed selected row.
+        value = str(state.get("semantic_value") or "").strip()
         if _correspondent_value_matches(value, expected, kind):
             return value
         if allow_closed_input and state.get("popup_visible") is False:
@@ -948,6 +1063,21 @@ def fill_correspondent_field(driver, person_name, kind="person", *, allow_create
     log.info(f"Корреспондент ({kind_label}): {shown_name}")
     time.sleep(1)
 
+    committed_values = _committed_correspondent_values(driver)
+    committed = next((
+        value for value in committed_values
+        if _correspondent_value_matches(value, person_name, kind)
+    ), "")
+    if committed:
+        log.info(f"Корреспондент уже выбран в документе: {shown_name}")
+        return True
+    if committed_values:
+        log.error(
+            "В поле Корреспондент уже выбрана другая запись — "
+            "автоматическая замена отменена"
+        )
+        return False
+
     inp = find_input_near_label(driver, "Корреспондент")
     if not inp:
         log.warning("Поле корреспондента не найдено")
@@ -957,7 +1087,37 @@ def fill_correspondent_field(driver, person_name, kind="person", *, allow_create
     search_value = person_name if exact_name else person_name.split()[0]
     initials = person_name if exact_name else fio_to_initials(person_name)
 
-    inp.click()
+    try:
+        inp.click()
+    except (
+            ElementClickInterceptedException,
+            ElementNotInteractableException,
+            StaleElementReferenceException):
+        # GXT can commit the selected row between lookup and click, replacing
+        # the editor with its hidden 1x1 focus sink. Re-read the strong state
+        # before attempting one fresh editor lookup.
+        committed_values = _committed_correspondent_values(driver)
+        if any(
+                _correspondent_value_matches(value, person_name, kind)
+                for value in committed_values):
+            log.info(f"Корреспондент уже выбран в документе: {shown_name}")
+            return True
+        time.sleep(0.2)
+        inp = find_input_near_label(driver, "Корреспондент")
+        if not inp:
+            log.error(
+                "Редактируемое поле Корреспондент исчезло, "
+                "а выбранное значение не подтверждено"
+            )
+            return False
+        try:
+            inp.click()
+        except (
+                ElementClickInterceptedException,
+                ElementNotInteractableException,
+                StaleElementReferenceException) as exc:
+            log.error(f"Не удалось активировать поле Корреспондент: {exc}")
+            return False
     # Combobox-autocomplete: JS-set + dispatch events открывают выпадашку
     js_type_combobox(driver, inp, search_value)
     log.info(f"Введён поиск (JS): {shown_name}")

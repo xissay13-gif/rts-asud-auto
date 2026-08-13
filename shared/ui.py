@@ -119,6 +119,30 @@ const labelText = arguments[0];
 const xp = `//*[normalize-space(text())='${labelText}']`;
 const snap = document.evaluate(xp, document, null,
     XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+function usable(inp) {
+    if (!inp || !inp.isConnected || inp.readOnly || inp.disabled) return false;
+    if ((inp.getAttribute('type') || '').toLowerCase() === 'hidden') return false;
+    if ((inp.getAttribute('aria-hidden') || '').toLowerCase() === 'true') return false;
+    const rect = inp.getBoundingClientRect();
+    const style = window.getComputedStyle(inp);
+    // GXT keeps a transparent 1x1 focus sink after a value is selected.
+    // It has an offsetParent, but it is not an editable field.
+    if (rect.width < 4 || rect.height < 4) return false;
+    if (style.display === 'none' || style.visibility === 'hidden' ||
+            parseFloat(style.opacity || '1') <= 0.05 ||
+            parseInt(style.zIndex || '0', 10) < 0 ||
+            style.pointerEvents === 'none') return false;
+    const pointX = rect.left + Math.min(rect.width / 2, 12);
+    const pointY = rect.top + rect.height / 2;
+    if (pointX >= 0 && pointX < window.innerWidth &&
+            pointY >= 0 && pointY < window.innerHeight) {
+        const top = document.elementFromPoint(pointX, pointY);
+        // An unrelated TD/button at the click point means Selenium will
+        // intercept the click. Off-screen inputs are checked after scrolling.
+        if (top && top !== inp && !inp.contains(top) && !top.contains(inp)) return false;
+    }
+    return true;
+}
 for (let i = 0; i < snap.snapshotLength; i++) {
     const label = snap.snapshotItem(i);
     if (!label.offsetParent) continue;
@@ -129,7 +153,7 @@ for (let i = 0; i < snap.snapshotLength; i++) {
         const inputs = parent.querySelectorAll(
             "input[id*='select_combobox-input'], input[type='text']");
         for (const inp of inputs) {
-            if (inp.offsetParent && !inp.readOnly) return inp;
+            if (usable(inp)) return inp;
         }
     }
 }
