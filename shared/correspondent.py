@@ -1,14 +1,15 @@
 """
 correspondent.py — Создание нового корреспондента в АСУД.
 
-7 шагов:
+8 шагов:
   1. Клик '+' у Корреспондент
   2. 'Добавить' в Поиске
   3. Поиск организации → 'Создать организацию'
   4. 'Добавить' в Физические лица
   5. Заполнить карточку (ФИО + Должность=ФЛ)
-  6. 'Выбрать физ. лиц'
-  7. 'Готово'
+  6. Отметить созданное физлицо в таблице
+  7. 'Выбрать физ. лиц'
+  8. 'Готово'
 """
 
 import re
@@ -350,6 +351,196 @@ def _find_visible(driver, by, selector):
         return None
 
 
+_FIND_OUTER_PERSON_ROWS_JS = r"""
+const selectButton = arguments[0];
+if (!selectButton || !selectButton.isConnected) return [];
+
+function visible(el) {
+    if (!el || !el.isConnected) return false;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' &&
+        style.visibility !== 'hidden' && parseFloat(style.opacity || '1') > 0.01;
+}
+
+let root = selectButton;
+for (let level = 0; level < 12 && root; level++, root = root.parentElement) {
+    const rows = Array.from(root.querySelectorAll(
+        "tr[class*='OuterPersonGridAppearance'], tr[class*='obj-list-debug-cls-per']"
+    )).filter(row => visible(row));
+    const records = rows.map(row => ({
+        row,
+        text: String(row.querySelector("td[cellindex='1']")?.textContent || '')
+            .replace(/\s+/g, ' ').trim(),
+        checker: row.querySelector("td[cellindex='0'] .check-cell") ||
+            row.querySelector("td:first-child [class*='rowChecker']"),
+    })).filter(record => record.text && record.checker);
+    if (records.length) return records;
+}
+return [];
+"""
+
+
+_CONTROL_ENABLED_JS = r"""
+const el = arguments[0];
+if (!el || !el.isConnected) return false;
+const rect = el.getBoundingClientRect();
+const style = window.getComputedStyle(el);
+const cls = (el.className || '').toString();
+const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+const hit = (x >= 0 && x < window.innerWidth && y >= 0 && y < window.innerHeight)
+    ? document.elementFromPoint(x, y) : null;
+const exposed = !!hit && (hit === el || el.contains(hit) || hit.contains(el));
+return rect.width > 0 && rect.height > 0 && style.display !== 'none' &&
+    style.visibility !== 'hidden' && exposed && style.pointerEvents !== 'none' &&
+    parseFloat(style.opacity || '1') >= 0.5 &&
+    el.getAttribute('data-disabled') !== '1' &&
+    (el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true' &&
+    !/(?:^|[\s_-])disabled(?:$|[\s_-])/i.test(cls);
+"""
+
+
+_ROW_SELECTED_JS = r"""
+const row = arguments[0], checker = arguments[1];
+if (!row || !row.isConnected || !checker || !checker.isConnected) return false;
+for (const el of [row, checker]) {
+    const attrs = [el.className, el.getAttribute('aria-selected'),
+        el.getAttribute('aria-checked'), el.getAttribute('data-selected'),
+        el.getAttribute('data-checked')].filter(Boolean).join(' ');
+    if (/(?:^|[\s_-])(selected|checked|row-selected|row-checked)(?:$|[\s_-])/i.test(attrs) ||
+            /row(?:checker)?checked|rowselected/i.test(attrs)) {
+        return true;
+    }
+}
+const input = row.querySelector("input[type='checkbox'],input[type='radio']");
+return !!(input && input.checked);
+"""
+
+
+def _outer_person_rows(driver, select_button):
+    try:
+        return list(driver.execute_script(
+            _FIND_OUTER_PERSON_ROWS_JS, select_button) or ())
+    except Exception:
+        return []
+
+
+def _control_enabled(driver, element):
+    if not element:
+        return False
+    try:
+        return bool(driver.execute_script(_CONTROL_ENABLED_JS, element))
+    except Exception:
+        return False
+
+
+def _select_created_person_row(driver, person_name, kind="person", timeout=15):
+    """Отмечает ровно одну созданную запись в таблице организации.
+
+    Реальный GXT после сохранения карточки добавляет строку, но оставляет её
+    checkbox пустым; кнопка «Выбрать физ. лиц» поэтому остаётся disabled.
+    """
+    lookup = {"ambiguous": False}
+
+    def _find_exact_row(d):
+        select_button = _find_visible(
+            d, By.ID, "outer_organisation_dialog-select_persons_button")
+        if not select_button:
+            return False
+        matches = []
+        for record in _outer_person_rows(d, select_button):
+            if not isinstance(record, dict):
+                continue
+            row = record.get("row")
+            text = str(record.get("text") or "")
+            checker = record.get("checker")
+            if not row or not checker:
+                continue
+            if _correspondent_value_matches(text, person_name, kind):
+                matches.append((row, checker))
+        if len(matches) > 1:
+            lookup["ambiguous"] = True
+            return False
+        if len(matches) != 1:
+            return False
+        row, checker = matches[0]
+        return row, checker, select_button
+
+    try:
+        row, checker, select_button = WebDriverWait(
+            driver, timeout).until(_find_exact_row)
+    except Exception:
+        if lookup["ambiguous"]:
+            log.error("В таблице найдено несколько одинаковых физических лиц")
+        else:
+            log.error("Созданное физическое лицо не найдено в таблице организации")
+        return False
+
+    if _control_enabled(driver, select_button):
+        try:
+            selected = bool(driver.execute_script(
+                _ROW_SELECTED_JS, row, checker))
+        except Exception:
+            selected = False
+        if selected:
+            return True
+        log.error(
+            "Кнопка 'Выбрать физ. лиц' уже активна, но точная строка "
+            "не подтверждена — выбор отменён"
+        )
+        return False
+
+    # GXT может перерисовать строку между поиском и кликом. На каждой попытке
+    # заново получаем row/checker, чтобы не повторять клик по stale WebElement.
+    for attempt in range(1, 4):
+        try:
+            found = WebDriverWait(driver, 3).until(_find_exact_row)
+        except Exception:
+            found = False
+        if not found:
+            continue
+        row, checker, select_button = found
+
+        if _control_enabled(driver, select_button):
+            try:
+                selected = bool(driver.execute_script(
+                    _ROW_SELECTED_JS, row, checker))
+            except Exception:
+                selected = False
+            if selected:
+                return True
+            log.error(
+                "Кнопка 'Выбрать физ. лиц' активировалась без "
+                "подтверждения точной строки — выбор отменён"
+            )
+            return False
+
+        if not click(driver, checker, "Отметить созданное физ. лицо"):
+            log.warning(
+                "Checkbox созданного физического лица не нажался "
+                f"(попытка {attempt}/3)"
+            )
+            continue
+
+        try:
+            def _row_selected_and_button_enabled(d):
+                current = _find_exact_row(d)
+                return bool(current and _control_enabled(d, current[2]))
+
+            WebDriverWait(driver, 5).until(
+                _row_selected_and_button_enabled
+            )
+            return True
+        except Exception:
+            log.warning(
+                "После выбора строки кнопка 'Выбрать физ. лиц' не "
+                f"активировалась (попытка {attempt}/3)"
+            )
+
+    log.error("Созданное физическое лицо не удалось отметить в таблице")
+    return False
+
+
 def create_correspondent(driver, person_name, kind="person"):
     """Создаёт карточку; привязка к документу проверяется вызывающим кодом."""
     legal = _is_legal_kind(kind)
@@ -368,7 +559,7 @@ def create_correspondent(driver, person_name, kind="person"):
     log.info(f"Создаю корреспондента ({kind_label}): {shown_card_name}")
 
     # ШАГ 1: Клик "+" у Корреспондент
-    log.info("[1/7] Клик '+' у Корреспондент")
+    log.info("[1/8] Клик '+' у Корреспондент")
     try:
         corr_input = find_input_near_label(driver, "Корреспондент")
         plus_btn = (_find_correspondent_add_button(driver, corr_input)
@@ -387,10 +578,12 @@ def create_correspondent(driver, person_name, kind="person"):
         return False
 
     # ШАГ 2: 'Добавить' в Поиске
-    log.info("[2/7] 'Добавить' в Поиске корреспондента")
+    log.info("[2/8] 'Добавить' в Поиске корреспондента")
     try:
-        add_btn = _wait_visible_xpath(
-            driver, "//*[normalize-space(text())='Добавить']", 15)
+        add_btn = _find_visible(driver, By.ID, "outer_org_person_add_button")
+        if not add_btn:
+            add_btn = _wait_visible_xpath(
+                driver, "//*[normalize-space(text())='Добавить']", 15)
         if not add_btn:
             log.error("Кнопка 'Добавить' не найдена")
             close_open_modals(driver)
@@ -411,7 +604,7 @@ def create_correspondent(driver, person_name, kind="person"):
         return False
 
     # ШАГ 3: Поиск организации → 'Создать организацию'
-    log.info("[3/7] Поиск организации")
+    log.info("[3/8] Поиск организации")
     try:
         org_heading = _wait_visible_xpath(
             driver, "//*[normalize-space(text())='Поиск организации']", 15)
@@ -443,12 +636,13 @@ def create_correspondent(driver, person_name, kind="person"):
             close_open_modals(driver)
             return False
 
-        # Ждём кнопку "Создать организацию"
+        # Ждём точную кнопку/ссылку "Создать организацию" из live DOM.
         create_org_btn = None
         for _ in range(10):
             create_org_btn = _find_visible(
                 driver,
                 By.CSS_SELECTOR,
+                "#outer_organisation_dialog-create_new_org_label, "
                 "[id*='create_custom_org'], [id*='custom_org_button']",
             )
             if not create_org_btn:
@@ -466,7 +660,14 @@ def create_correspondent(driver, person_name, kind="person"):
                 log.error("Кнопка 'Создать организацию' не нажалась")
                 close_open_modals(driver)
                 return False
-            time.sleep(1)
+            WebDriverWait(driver, 15).until(
+                lambda d: _control_enabled(
+                    d,
+                    _find_visible(
+                        d, By.ID,
+                        "outer_organisation_dialog-add_person_button"),
+                )
+            )
         else:
             log.warning("Кнопка 'Создать организацию' не найдена")
             close_open_modals(driver)
@@ -477,7 +678,7 @@ def create_correspondent(driver, person_name, kind="person"):
         return False
 
     # ШАГ 4: 'Добавить' в Физические лица
-    log.info("[4/7] 'Добавить' в Физические лица")
+    log.info("[4/8] 'Добавить' в Физические лица")
     try:
         _wait_visible_xpath(
             driver, "//*[contains(text(),'Физические лица')]", 15)
@@ -488,6 +689,7 @@ def create_correspondent(driver, person_name, kind="person"):
                 btn = _find_visible(
                     driver,
                     By.CSS_SELECTOR,
+                    "#outer_organisation_dialog-add_person_button, "
                     "[id*='header-organization-dialog-add-a-user-button']",
                 )
                 if not btn:
@@ -502,16 +704,7 @@ def create_correspondent(driver, person_name, kind="person"):
                         if btn:
                             break
                 if btn:
-                    is_enabled = driver.execute_script("""
-                        var el = arguments[0];
-                        if (!el.offsetParent) return false;
-                        if (el.getAttribute('aria-disabled')==='true') return false;
-                        if (el.classList.contains('x-disabled')) return false;
-                        var style = window.getComputedStyle(el);
-                        if (style.pointerEvents==='none') return false;
-                        if (parseFloat(style.opacity)<0.5) return false;
-                        return true;
-                    """, btn)
+                    is_enabled = _control_enabled(driver, btn)
                     if is_enabled:
                         add_user_btn = btn
                         break
@@ -534,7 +727,8 @@ def create_correspondent(driver, person_name, kind="person"):
         return False
 
     # ШАГ 5: Заполнить карточку
-    log.info("[5/7] Заполнение карточки")
+    log.info("[5/8] Заполнение карточки")
+    save_submitted = False
     try:
         fields = [
             ("Фамилия", surname, "outer_person_dialog-last_name-input"),
@@ -569,6 +763,7 @@ def create_correspondent(driver, person_name, kind="person"):
         save_btn = _find_visible(
             driver,
             By.CSS_SELECTOR,
+            "#outer_person_dialog-save_button, "
             "[id*='Parton_person_dialog_save_button']",
         )
         if not save_btn:
@@ -585,18 +780,39 @@ def create_correspondent(driver, person_name, kind="person"):
             log.error("Карточка корреспондента не сохранилась")
             close_open_modals(driver)
             return False
-        _wait_visible_xpath(driver, "//*[contains(text(),'Выбрать физ')]", 15)
+        save_submitted = True
+        WebDriverWait(driver, 15).until(
+            lambda d: _find_visible(
+                d, By.ID,
+                "outer_organisation_dialog-select_persons_button"))
     except Exception as e:
         log.error(f"Шаг 5: {e}")
         close_open_modals(driver)
+        if save_submitted:
+            log.warning(
+                "Сохранение карточки уже отправлено — создание повторно "
+                "не запускаю, продолжу только поиском существующей записи"
+            )
+            return True
         return False
 
-    # ШАГ 6: 'Выбрать физ. лиц'
-    log.info("[6/7] Выбрать физ. лиц")
+    # ШАГ 6: отметить созданную строку. В GXT она НЕ выбирается автоматически.
+    log.info("[6/8] Отметить созданное физ. лицо")
+    if not _select_created_person_row(driver, person_name, kind=kind, timeout=15):
+        log.warning(
+            "Карточка корреспондента уже сохранена, но строка не выбрана — "
+            "закрываю окна и продолжу только поиском существующей записи"
+        )
+        close_open_modals(driver)
+        return True
+
+    # ШАГ 7: 'Выбрать физ. лиц'
+    log.info("[7/8] Выбрать физ. лиц")
     try:
         select_btn = _find_visible(
             driver,
             By.CSS_SELECTOR,
+            "#outer_organisation_dialog-select_persons_button, "
             "[id*='Parton_organization_dialog_select_persons_button']",
         )
         if not select_btn:
@@ -607,20 +823,20 @@ def create_correspondent(driver, person_name, kind="person"):
         if not select_btn:
             log.error("Кнопка 'Выбрать физ. лиц' не найдена")
             close_open_modals(driver)
-            return False
+            return True
         if not click(driver, select_btn, "Выбрать физ. лиц"):
             log.error("Кнопка 'Выбрать физ. лиц' не нажалась")
             close_open_modals(driver)
-            return False
+            return True
         WebDriverWait(driver, 15).until(
             lambda d: _find_visible(d, By.ID, "oshs-select-button"))
     except Exception as e:
-        log.error(f"Шаг 6: {e}")
+        log.error(f"Шаг 7: {e}")
         close_open_modals(driver)
-        return False
+        return True
 
-    # ШАГ 7: 'Готово'
-    log.info("[7/7] Готово")
+    # ШАГ 8: 'Готово'
+    log.info("[8/8] Готово")
     try:
         done_btn = _find_visible(driver, By.ID, "oshs-select-button")
         if not done_btn:
@@ -632,11 +848,11 @@ def create_correspondent(driver, person_name, kind="person"):
         if not done_btn:
             log.error("Кнопка 'Готово' не найдена")
             close_open_modals(driver)
-            return False
+            return True
         if not click(driver, done_btn, "Готово"):
             log.error("Кнопка 'Готово' не нажалась")
             close_open_modals(driver)
-            return False
+            return True
         from shared.ui import wait_modal_closed
         wait_modal_closed(driver)
         selected = _wait_for_correspondent_value(
@@ -655,9 +871,9 @@ def create_correspondent(driver, person_name, kind="person"):
         )
         return True
     except Exception as e:
-        log.error(f"Шаг 7: {e}")
+        log.error(f"Шаг 8: {e}")
         close_open_modals(driver)
-        return False
+        return True
 
 
 _READ_COMMITTED_CORRESPONDENT_JS = r"""
