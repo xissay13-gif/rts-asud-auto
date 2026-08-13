@@ -7,6 +7,7 @@ from flows.sbis import (
     content_from_file,
     derive_surname,
     load_manifest_ids,
+    _output_path,
     parse_protocol_filename,
     prepare_items,
     scan_files,
@@ -14,6 +15,16 @@ from flows.sbis import (
 
 
 class SbisFlowTests(unittest.TestCase):
+    def test_output_registry_is_created_in_source_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Корр Вх"
+            root.mkdir()
+
+            output = Path(_output_path(root))
+
+            self.assertEqual(output.parent, root.resolve())
+            self.assertEqual(output.name, "СБИС_Корр_Вх_резолюции.xlsx")
+
     def test_content_uses_filename_without_extension(self):
         path = Path("Ответ на требование.pdf")
         self.assertEqual(content_from_file(path), "Ответ на требование")

@@ -374,8 +374,10 @@ def _resolve_driver(base_dir):
 
 
 def _output_path(root):
-    safe = re.sub(r"[^A-Za-zА-Яа-яЁё0-9_.\-]+", "_", Path(root).name).strip("_")
-    return mix_flow._output_xlsx_path(f"СБИС_{safe or 'письма'}.xlsx")
+    """Путь реестра рядом с исходными вложениями СБИС."""
+    root = Path(root).resolve()
+    safe = re.sub(r"[^A-Za-zА-Яа-яЁё0-9_.\-]+", "_", root.name).strip("_")
+    return str(root / f"СБИС_{safe or 'письма'}_резолюции.xlsx")
 
 
 def main():
