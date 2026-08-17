@@ -38,7 +38,7 @@ from shared.attachments import move_to_done, move_to_errors, move_to_drafts
 from shared.colors import green, yellow, red, status_colored
 from shared.classifier import classify_doc_type
 from shared.zhkh_parser import parse_zhkh_body
-from shared.zhkh_routing import resolve_addressee_override
+from shared.zhkh_routing import match_excluded_topic
 from shared.feedback_parser import parse_feedback_body
 from shared.xlsx_lock import xlsx_lock
 from shared.xlsx_format import format_registry_before_save
@@ -64,6 +64,10 @@ for _noisy in ("extract_msg", "olefile"):
 start_time = time.monotonic()
 
 settings = {}
+
+
+class ExclusionMarkerError(RuntimeError):
+    """Excluded MSG could not be marked terminal; ASUD processing must stop."""
 
 
 # ================= ENCODING-FIX =================
@@ -243,15 +247,15 @@ def _safe_field(msg, attr, msg_path, prop_id):
 
 # ================= PER-DATE XLSX REGISTRY =================
 
-# Колонки накопительного реестра. «Адресат» фиксирует фактический маршрут;
-# последние две колонки заполняются последующими daemon-проходами. Для прямого
-# маршрута Жукову обе сразу получают «Не требуется», чтобы legacy-цепочка
-# Басманов → Халецкая → округ не пыталась обработать чужой документ.
-_REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body", "Адресат",
+# Колонки реестра (под per-date).
+# Колонки 1-5 — данные документа, 6 — статус/дата обработки, 7-8 —
+# заполняются позже («Отписано Халецкой» — после второго прохода ГИСЖКХ,
+# «Отписано в округ» — после прогона clean-resolutions).
+_REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body",
                      "Дата получения", "Планируемая дата", "Статус",
                      "Отписано Халецкой", "Отписано в округ"]
-_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 60, 6: 34, 7: 16, 8: 16,
-                    9: 28, 10: 24, 11: 24}
+_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 60, 6: 16, 7: 16, 8: 28,
+                    9: 18, 10: 18}
 
 
 def _xlsx_path(base_dir, suffix=None, target_folder=None):
@@ -346,35 +350,16 @@ def _append_dated_row(path, doc, asud_id, status="OK"):
         "Округ":             doc.get("округ_прогноз") or "",
         "Subject":           doc.get("тема") or "",
         "Body":              doc.get("содержание") or "",  # уже _clean_body
-        "Адресат":           "; ".join(doc.get("assigned_addressees") or []),
         "Дата получения":    recv_str,
         "Планируемая дата":  doc.get("планируемая_дата") or "",
         "Статус":            status_text,
     }
-    if doc.get("skip_legacy_resolution_chain"):
-        direct_names = values["Адресат"] or "; ".join(
-            doc.get("addressees_override") or []
-        )
-        marker = f"Не требуется — прямой адресат: {direct_names or 'другой'}"
-        values["Отписано Халецкой"] = marker
-        values["Отписано в округ"] = marker
     try:
         with xlsx_lock(path, timeout=60):
             wb = openpyxl.load_workbook(path)
             ws = wb.active
             # Шапка существующего файла
             headers = [str(c.value or '').strip() for c in next(ws.iter_rows(max_row=1))]
-            # Старые накопительные реестры создавались без колонки «Адресат».
-            # Мигрируем атомарно под тем же lock перед append: старые строки
-            # останутся пустыми и трактуются daemon'ом как legacy-Басманов.
-            if "Адресат" not in headers:
-                new_col = len(headers) + 1
-                ws.cell(row=1, column=new_col, value="Адресат")
-                ws.cell(row=1, column=new_col).font = openpyxl.styles.Font(bold=True)
-                ws.column_dimensions[
-                    openpyxl.utils.get_column_letter(new_col)
-                ].width = 34
-                headers.append("Адресат")
             row = [values.get(h, "") for h in headers]
             ws.append(row)
             format_registry_before_save(ws, path, changed_row=ws.max_row)
@@ -400,29 +385,30 @@ def _list_root_msgs(folder_path):
         return []
 
 
-def _quarantine_terminal_msg(msg_path, folder, status, reason):
-    """Не даёт письму с неопределённой регистрацией попасть в очередь снова.
+def _write_terminal_marker(msg_path, status, reason, **metadata):
+    """Атомарно исключает MSG из повторного сканирования.
 
-    Маркер пишется атомарно *до* перемещения. Если UNC/антивирус держит MSG и
-    ``Ошибки/`` временно недоступна, корневой сканер всё равно пропустит файл.
-    При успешном перемещении маркер больше не нужен и удаляется.
+    Возвращает путь к маркеру либо ``None``. Сам MSG не изменяет.
     """
+    if not msg_path:
+        return None
     marker = str(msg_path) + ".asud_terminal.json"
     tmp = marker + ".tmp"
-    marker_written = False
     payload = {
         "version": 1,
         "status": str(status),
         "reason": str(reason),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
+    payload.update({key: value for key, value in metadata.items()
+                    if value is not None})
     try:
         with open(tmp, "w", encoding="utf-8") as stream:
             json.dump(payload, stream, ensure_ascii=False, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, marker)
-        marker_written = True
+        return marker
     except Exception as exc:
         try:
             if os.path.exists(tmp):
@@ -430,11 +416,50 @@ def _quarantine_terminal_msg(msg_path, folder, status, reason):
         except Exception:
             pass
         log.error(f"Не удалось записать terminal-маркер для {msg_path}: {exc}")
+        return None
+
+
+def _exclude_msg_from_asud(msg_path, doc):
+    """Оставляет GIS MSG в корне, но навсегда исключает его из ASUD-очереди.
+
+    GIS downloader дедуплицирует обращения по наличию исходного ``.msg`` в
+    корне. Поэтому файл нельзя удалять или переносить: иначе он скачается снова.
+    """
+    topic_code = doc.get("zhkh_topic_code")
+    topic_title = doc.get("тема_обращения")
+    reason = (
+        f"Тема ГИС ЖКХ {topic_code or ''} исключена из регистрации в АСУД"
+    ).strip()
+    marker = _write_terminal_marker(
+        msg_path,
+        "EXCLUDED",
+        reason,
+        topic_code=topic_code,
+        topic_title=topic_title,
+    )
+    if not marker:
+        return False
+    log.warning(
+        f"{os.path.basename(str(msg_path))}: НЕ регистрируется в АСУД; "
+        f"MSG оставлен для дедупликации выгрузчика, marker={marker}"
+    )
+    return True
+
+
+def _quarantine_terminal_msg(msg_path, folder, status, reason):
+    """Не даёт письму с неопределённой регистрацией попасть в очередь снова.
+
+    Маркер пишется атомарно *до* перемещения. Если UNC/антивирус держит MSG и
+    ``Ошибки/`` временно недоступна, корневой сканер всё равно пропустит файл.
+    При успешном перемещении маркер больше не нужен и удаляется.
+    """
+    marker = _write_terminal_marker(msg_path, status, reason)
+    marker_written = bool(marker)
 
     moved = bool(move_to_errors(msg_path, folder, reason))
     if moved:
         try:
-            if os.path.exists(marker):
+            if marker and os.path.exists(marker):
                 os.remove(marker)
         except Exception as exc:
             # MSG уже вне корня, оставшийся marker безвреден.
@@ -495,27 +520,28 @@ def _parse_one_msg(msg_path, process_mode="mix"):
     # Парсим ТОЛЬКО если не ZHKH (zhkh > feedback по приоритету).
     feedback = None if zhkh else parse_feedback_body(body, subject=subject)
 
-    addressees_override = None
+    skip_asud_registration = False
     zhkh_topic_code = None
     if zhkh:
         try:
-            addressees_override, zhkh_topic_code = resolve_addressee_override(
+            zhkh_topic_code = match_excluded_topic(
                 zhkh.get("тема_обращения"),
                 settings.get(
-                    "zhkh_addressee_routes",
-                    cfg.DEFAULTS["zhkh_addressee_routes"],
+                    "zhkh_excluded_topics",
+                    cfg.DEFAULTS["zhkh_excluded_topics"],
                 ),
             )
         except ValueError as exc:
             log.error(
-                f"{os.path.basename(msg_path)}: некорректная маршрутизация "
-                f"ГИС ЖКХ — {exc}; письмо не будет отправлено случайному адресату"
+                f"{os.path.basename(msg_path)}: некорректная политика "
+                f"исключений ГИС ЖКХ — {exc}; письмо не будет передано в АСУД"
             )
             return None
-        if addressees_override:
-            log.info(
+        skip_asud_registration = bool(zhkh_topic_code)
+        if skip_asud_registration:
+            log.warning(
                 f"{os.path.basename(msg_path)}: тема ГИС ЖКХ "
-                f"{zhkh_topic_code} → адресат {', '.join(addressees_override)}"
+                f"{zhkh_topic_code} исключена из регистрации в АСУД"
             )
 
     force_draft = False
@@ -651,10 +677,9 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         "планируемая_дата": (zhkh_deadline or zhkh.get('планируемая_дата')) if zhkh else None,
         "тема_обращения":   zhkh.get('тема_обращения') if zhkh else None,
         "zhkh_topic_code":  zhkh_topic_code,
-        "addressees_override": addressees_override,
-        # Прямые тематические маршруты не принадлежат цепочке
-        # Басманов → Халецкая → округ и должны быть исключены из её daemon'ов.
-        "skip_legacy_resolution_chain": bool(addressees_override),
+        # Явная бизнес-политика: карточку документа не открывать и ничего не
+        # писать в реестр резолюций. Caller оставит MSG в корне с terminal-marker.
+        "skip_asud_registration": skip_asud_registration,
     }
 
 
@@ -700,12 +725,22 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
     output_suffix — суффикс в имени per-date xlsx (для разделения реестров
     при параллельных запусках двух пресетов).
 
-    Возвращает финальный статус: 'OK' | 'DUPLICATE' | 'DRAFT' |
+    Возвращает финальный статус: 'OK' | 'DUPLICATE' | 'DRAFT' | 'EXCLUDED' |
     'REGISTERED_ONLY' | 'SUBMISSION_UNKNOWN' | 'FAILED'.
     in_daemon=True (mix-режим): DRAFT → перенос в Черновики/.
     """
     msg_path = doc.get("файл")
     written_xlsx = None  # путь к xlsx куда записали (для второго прохода)
+
+    # Business exclusion is terminal and happens before any ASUD/UI call.
+    # The MSG stays in the root so the GIS downloader does not fetch it again;
+    # the adjacent marker makes _list_root_msgs ignore it forever.
+    if doc.get("skip_asud_registration"):
+        if not _exclude_msg_from_asud(msg_path, doc):
+            raise ExclusionMarkerError(
+                "не удалось записать marker исключения; вход в АСУД запрещён"
+            )
+        return "EXCLUDED", None, None
 
     if process_mode == "smart" and doc.get("корр_источник") not in ("zhkh", "feedback"):
         # Smart-пресет: каждый .msg создаётся как черновик с фикс. корреспондентом.
@@ -855,7 +890,7 @@ def main():
         # Каждый doc пишется в xlsx своей даты (из имени .msg).
         log.info(f"Per-date реестры в: {os.path.join(base_dir, 'Registered')}")
 
-        done_count, dup_count, draft_count, err_count = 0, 0, 0, 0
+        done_count, dup_count, draft_count, excluded_count, err_count = 0, 0, 0, 0, 0
         # Просто счётчик зарегистрированных ГИСЖКХ — для итогового лога.
         # Сама отписка делается отдельным процессом
         # (АСУД_ЖКХ_резолюции_Халецкой.bat).
@@ -876,6 +911,8 @@ def main():
                     dup_count += 1
                 elif status == "DRAFT":
                     draft_count += 1
+                elif status == "EXCLUDED":
+                    excluded_count += 1
                 elif status in {"REGISTERED_ONLY", "SUBMISSION_UNKNOWN"}:
                     reason = (
                         "Документ зарегистрирован, но резолюция не подтверждена"
@@ -899,6 +936,11 @@ def main():
                     err_count += 1
                 _print_doc_line(i, len(docs), status,
                                  doc.get("тема", "")[:60])
+            except ExclusionMarkerError as e:
+                log.critical(f"ОСТАНОВКА на документе {i}: {e}")
+                err_count += 1
+                _print_doc_line(i, len(docs), "FAILED", str(e))
+                break
             except Exception as e:
                 log.error(f"ОШИБКА документ {i}: {e}")
                 move_to_errors(msg_path, folder, f"Exception: {e}")
@@ -923,6 +965,7 @@ def main():
             f"  Обработано:   {done_count} / {len(docs)}  (→ Завершено/)",
             f"  Дубликаты:    {dup_count}  (уже были в АСУД, → Завершено/)",
             f"  В черновиках: {draft_count}  (ФИО не найдено, .msg остался в корне)",
+            f"  Исключено:    {excluded_count}  (в АСУД не передавались)",
             f"  Ошибок:       {err_count}  (→ Ошибки/)",
             f"  Затрачено:    {elapsed}" + (f"  (в среднем {avg}/док)" if avg else ""),
             "=" * 60,
@@ -935,6 +978,7 @@ def main():
         print(f"  Обработано:   {green(str(done_count))} / {len(docs)}  (→ Завершено/)")
         print(f"  Дубликаты:    {dup_count}  (уже были в АСУД, → Завершено/)")
         print(f"  В черновиках: {yellow(str(draft_count))}  (ФИО не найдено, .msg в корне)")
+        print(f"  Исключено:    {yellow(str(excluded_count))}  (в АСУД не передавались)")
         print(f"  Ошибок:       {red(str(err_count))}  (→ Ошибки/)")
         print(f"  Затрачено:    {elapsed}" + (f"  (в среднем {avg}/док)" if avg else ""))
         print("=" * 60)
@@ -1093,7 +1137,14 @@ def daemon_main():
 
     # Счётчики и retry-state
     retry_count = {}  # абсолютный путь MSG → int (фейлов подряд)
-    totals = {"OK": 0, "DUPLICATE": 0, "DRAFT": 0, "FAILED": 0, "ITER": 0}
+    totals = {
+        "OK": 0,
+        "DUPLICATE": 0,
+        "DRAFT": 0,
+        "EXCLUDED": 0,
+        "FAILED": 0,
+        "ITER": 0,
+    }
     rr_idx = 0  # для round-robin между папками
 
     def _process_folder(current_folder, current_suffix):
@@ -1185,6 +1236,12 @@ def daemon_main():
                     retry_count.pop(retry_key, None)
                     _print_doc_line(idx, len(queue), status,
                                      doc.get("тема", "")[:60])
+            except ExclusionMarkerError as e:
+                log.critical(f"ОСТАНОВКА на {name}: {e}")
+                totals["FAILED"] += 1
+                _print_doc_line(idx, len(queue), "FAILED", str(e))
+                _stop_flag = True
+                return idx
             except Exception as e:
                 log.error(f"Exception на {name}: {e}")
                 retry_count[retry_key] = retry_count.get(retry_key, 0) + 1
@@ -1229,10 +1286,12 @@ def daemon_main():
                 break
             log.info(f"  итог итер. {totals['ITER']}: "
                      f"OK={totals['OK']} DUP={totals['DUPLICATE']} "
-                     f"DRAFT={totals['DRAFT']} FAIL={totals['FAILED']}")
+                     f"DRAFT={totals['DRAFT']} EXCLUDED={totals['EXCLUDED']} "
+                     f"FAIL={totals['FAILED']}")
             print(f"  итог итер. {totals['ITER']}: "
                   f"OK={green(str(totals['OK']))} DUP={totals['DUPLICATE']} "
                   f"DRAFT={yellow(str(totals['DRAFT']))} "
+                  f"EXCLUDED={yellow(str(totals['EXCLUDED']))} "
                   f"FAIL={red(str(totals['FAILED']))}")
             _interruptible_sleep(interval)
 
@@ -1242,6 +1301,7 @@ def daemon_main():
         log.info(f"  Обработано: {totals['OK']}")
         log.info(f"  Дубликаты:  {totals['DUPLICATE']}")
         log.info(f"  Черновики:  {totals['DRAFT']}")
+        log.info(f"  Исключено:  {totals['EXCLUDED']}")
         log.info(f"  Ошибки:     {totals['FAILED']}")
         log.info("=" * 60)
         print("=" * 60)
@@ -1250,6 +1310,7 @@ def daemon_main():
         print(f"  Обработано: {green(str(totals['OK']))}")
         print(f"  Дубликаты:  {totals['DUPLICATE']}")
         print(f"  Черновики:  {yellow(str(totals['DRAFT']))}")
+        print(f"  Исключено:  {yellow(str(totals['EXCLUDED']))}")
         print(f"  Ошибки:     {red(str(totals['FAILED']))}")
         print("=" * 60)
 
