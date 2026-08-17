@@ -3,6 +3,8 @@ name: Build АСУД EXE
 on:
   push:
     branches: [ main, registration, codex/sbis-registration ]
+  pull_request:
+    branches: [ registration ]
   workflow_dispatch:
 
 jobs:
