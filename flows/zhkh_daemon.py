@@ -17,10 +17,12 @@ P2 в конвейере регистратор → Басманов → Хал�
 
 import glob
 import os
+import re
 import signal
 import sys
 import time
 import logging
+import unicodedata
 from datetime import timedelta
 
 import openpyxl
@@ -76,12 +78,34 @@ def _interruptible_sleep(seconds):
 
 # ================= READING THE XLSX =================
 
-def _read_todo(xlsx_path, status_column=COL_HALETSKAYA):
+def _route_belongs_to_user(addressee_value, expected_user):
+    """Legacy blank route belongs to Basmanov; explicit routes must match."""
+    explicit = str(addressee_value or "").strip()
+    expected = str(expected_user or "").strip()
+    if not explicit or not expected:
+        return True
+
+    def tokens(value):
+        normalized = unicodedata.normalize("NFKC", value).casefold().replace("ё", "е")
+        return re.findall(r"[0-9a-zа-я-]+", normalized)
+
+    expected_tokens = tokens(expected)
+    explicit_tokens = tokens(explicit)
+    if not expected_tokens:
+        return True
+    # settings usually contains just the account surname ("Басманов").
+    # Token equality deliberately rejects substring lookalikes.
+    return expected_tokens[0] in explicit_tokens
+
+
+def _read_todo(xlsx_path, status_column=COL_HALETSKAYA,
+               expected_addressee=None):
     """Читает реестр и возвращает список todo-строк.
 
     Включает только строки с:
       • непустым asud_id (Номер)
       • пустой колонкой status_column
+      • пустым legacy-адресатом либо явным адресатом текущей учётки
 
     Каждая строка — dict с asud_id, planned_date, xlsx_path.
     Lock-acquire не нужен — read-only через openpyxl, не пишем.
@@ -118,6 +142,11 @@ def _read_todo(xlsx_path, status_column=COL_HALETSKAYA):
             if 'планиру' in h:
                 planned_col = i
                 break
+        addressee_col = None
+        for i, h in enumerate(headers_lower):
+            if h == 'адресат':
+                addressee_col = i
+                break
 
         for r in rows[1:]:
             if asud_col >= len(r):
@@ -129,6 +158,12 @@ def _read_todo(xlsx_path, status_column=COL_HALETSKAYA):
                 status = str(r[status_col] or '').strip() if r[status_col] is not None else ''
                 if status:
                     continue
+            explicit_addressee = None
+            if addressee_col is not None and addressee_col < len(r):
+                explicit_addressee = r[addressee_col]
+            if not _route_belongs_to_user(
+                    explicit_addressee, expected_addressee):
+                continue
             planned = None
             if planned_col is not None and planned_col < len(r):
                 pv = r[planned_col]
@@ -137,6 +172,8 @@ def _read_todo(xlsx_path, status_column=COL_HALETSKAYA):
             out.append({
                 'asud_id': aid,
                 'planned_date': planned,
+                'addressee': (str(explicit_addressee).strip()
+                              if explicit_addressee else None),
                 'xlsx_path': xlsx_path,
             })
         wb.close()
@@ -449,7 +486,9 @@ def main():
                 if cur_mtime == last_mtime and iters > 1:
                     continue
                 changed_files += 1
-                todo_all.extend(_read_todo(xpath))
+                todo_all.extend(
+                    _read_todo(xpath, expected_addressee=switch_to)
+                )
                 mtime_cache[xpath] = cur_mtime
 
             if not todo_all:

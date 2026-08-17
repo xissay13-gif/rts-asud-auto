@@ -2,7 +2,7 @@ name: Build АСУД EXE
 
 on:
   push:
-    branches: [ main, registration ]
+    branches: [ main, registration, codex/sbis-registration ]
   workflow_dispatch:
 
 jobs:
@@ -45,6 +45,7 @@ jobs:
         --hidden-import=shared.colors
         --hidden-import=shared.classifier
         --hidden-import=shared.zhkh_parser
+        --hidden-import=shared.zhkh_routing
         --hidden-import=shared.feedback_parser
         --hidden-import=shared.deadline
         --hidden-import=shared.asud_resolution
@@ -52,6 +53,7 @@ jobs:
         --hidden-import=flows.auto_create
         --hidden-import=flows.smart
         --hidden-import=flows.email
+        --hidden-import=flows.sbis
         --hidden-import=flows.zhkh_daemon
         --hidden-import=shared.xlsx_lock
         --hidden-import=shared.xlsx_status
@@ -67,8 +69,10 @@ jobs:
         Copy-Item asud_headless.bat dist\release\ -ErrorAction SilentlyContinue
         Copy-Item asud_email_watch.bat dist\release\ -ErrorAction SilentlyContinue
         Copy-Item asud_auto_create_headless.bat dist\release\ -ErrorAction SilentlyContinue
-        Copy-Item asud_zhkh_daemon.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item asud_sbis.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item АСУД_ЖКХ_резолюции_Халецкой.bat dist\release\ -ErrorAction SilentlyContinue
         Copy-Item settings.json.example dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item SBIS_REGISTRATION.md dist\release\ -ErrorAction SilentlyContinue
 
     - name: Zip release
       shell: pwsh

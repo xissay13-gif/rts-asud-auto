@@ -1085,6 +1085,32 @@ def close_card_and_wait_main(driver):
 _last_result = {"status": "UNKNOWN"}
 
 
+def _document_addressees(doc_data):
+    """Resolve the actual addressee list, honoring a fail-closed doc override."""
+    override = doc_data.get("addressees_override")
+    if override is not None:
+        if isinstance(override, str) or not isinstance(override, (list, tuple)):
+            raise RuntimeError("некорректный тематический маршрут адресата")
+        raw = override
+    else:
+        raw = settings.get("addressees", cfg.DEFAULTS["addressees"])
+        if isinstance(raw, str):
+            raw = [raw]
+
+    resolved = []
+    for value in raw or []:
+        name = str(value or "").strip()
+        if name and name not in resolved:
+            resolved.append(name)
+
+    if override is not None and not resolved:
+        # A matched GIS rule must never silently fall back to Basmanov.
+        raise RuntimeError("тематический маршрут ГИС ЖКХ не содержит адресата")
+
+    doc_data["assigned_addressees"] = resolved
+    return resolved
+
+
 def create_one_document(driver, doc_data, index, total):
     """Создаёт один входящий документ."""
     _last_result["status"] = "FAILED"
@@ -1093,6 +1119,14 @@ def create_one_document(driver, doc_data, index, total):
     log.info(f"Корреспондент: {doc_data['корреспондент']} "
              f"({'найден ' + (doc_data['корр_источник'] or '') if doc_data['корр_найден'] else 'ЗАГЛУШКА'})")
     log.info(f"Тип: {doc_data['тип_название']}")
+
+    # Business routing is resolved before opening a card. A malformed matched
+    # GIS rule must fail before any UI side effect, never fall back to Basmanov.
+    try:
+        document_addressees = _document_addressees(doc_data)
+    except RuntimeError as exc:
+        log.error(f"Адресат не определён безопасно: {exc}")
+        raise
 
     # [1/7] Кнопка создания
     el = WebDriverWait(driver, cfg.DEFAULTS["timeout"]).until(
@@ -1148,7 +1182,15 @@ def create_one_document(driver, doc_data, index, total):
                       override=doc_data.get("номер_обращения"))
     fill_corr_date(driver, override=doc_data.get("дата_обращения"))
 
-    for addr in settings.get("addressees", cfg.DEFAULTS["addressees"]):
+    if doc_data.get("addressees_override") is not None:
+        log.info(
+            "Тематический маршрут ГИС ЖКХ%s: %s",
+            (f" {doc_data.get('zhkh_topic_code')}"
+             if doc_data.get("zhkh_topic_code") else ""),
+            ", ".join(document_addressees),
+        )
+
+    for addr in document_addressees:
         if not add_addressee(driver, addr):
             _last_result["status"] = "FAILED"
             log.error("Адресат не подтверждён — документ остановлен до сохранения")

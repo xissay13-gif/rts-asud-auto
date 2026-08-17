@@ -10,6 +10,8 @@ import sys
 import json
 import logging
 
+from shared.zhkh_routing import DEFAULT_ZHKH_ADDRESSEE_ROUTES
+
 log = logging.getLogger("asud.config")
 
 # Дефолтные значения
@@ -20,6 +22,10 @@ DEFAULTS = {
     "addressees": [
         "Басманов Александр Владимирович",
     ],
+    # Точечная маршрутизация ГИС ЖКХ по ПОЛНОМУ названию темы. Цифровые
+    # ключи — номера из бизнес-таблицы; текущий MSG хранит только название.
+    # Совпавшее правило полностью заменяет общий список addressees.
+    "zhkh_addressee_routes": DEFAULT_ZHKH_ADDRESSEE_ROUTES,
     "unknown_correspondent": "Неизвестный Неизвестный Неизвестный",
     "delivery_method": "Электронная почта",
     "sheet_name": "Лист2",

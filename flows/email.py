@@ -38,6 +38,7 @@ from shared.attachments import move_to_done, move_to_errors, move_to_drafts
 from shared.colors import green, yellow, red, status_colored
 from shared.classifier import classify_doc_type
 from shared.zhkh_parser import parse_zhkh_body
+from shared.zhkh_routing import resolve_addressee_override
 from shared.feedback_parser import parse_feedback_body
 from shared.xlsx_lock import xlsx_lock
 from shared.xlsx_format import format_registry_before_save
@@ -242,15 +243,15 @@ def _safe_field(msg, attr, msg_path, prop_id):
 
 # ================= PER-DATE XLSX REGISTRY =================
 
-# Колонки реестра (под per-date).
-# Колонки 1-5 — данные документа, 6 — статус/дата обработки, 7-8 —
-# заполняются позже («Отписано Халецкой» — после второго прохода ГИСЖКХ,
-# «Отписано в округ» — после прогона clean-resolutions).
-_REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body",
+# Колонки накопительного реестра. «Адресат» фиксирует фактический маршрут;
+# последние две колонки заполняются последующими daemon-проходами. Для прямого
+# маршрута Жукову обе сразу получают «Не требуется», чтобы legacy-цепочка
+# Басманов → Халецкая → округ не пыталась обработать чужой документ.
+_REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body", "Адресат",
                      "Дата получения", "Планируемая дата", "Статус",
                      "Отписано Халецкой", "Отписано в округ"]
-_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 60, 6: 16, 7: 16, 8: 28,
-                    9: 18, 10: 18}
+_REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 60, 6: 34, 7: 16, 8: 16,
+                    9: 28, 10: 24, 11: 24}
 
 
 def _xlsx_path(base_dir, suffix=None, target_folder=None):
@@ -345,16 +346,35 @@ def _append_dated_row(path, doc, asud_id, status="OK"):
         "Округ":             doc.get("округ_прогноз") or "",
         "Subject":           doc.get("тема") or "",
         "Body":              doc.get("содержание") or "",  # уже _clean_body
+        "Адресат":           "; ".join(doc.get("assigned_addressees") or []),
         "Дата получения":    recv_str,
         "Планируемая дата":  doc.get("планируемая_дата") or "",
         "Статус":            status_text,
     }
+    if doc.get("skip_legacy_resolution_chain"):
+        direct_names = values["Адресат"] or "; ".join(
+            doc.get("addressees_override") or []
+        )
+        marker = f"Не требуется — прямой адресат: {direct_names or 'другой'}"
+        values["Отписано Халецкой"] = marker
+        values["Отписано в округ"] = marker
     try:
         with xlsx_lock(path, timeout=60):
             wb = openpyxl.load_workbook(path)
             ws = wb.active
             # Шапка существующего файла
             headers = [str(c.value or '').strip() for c in next(ws.iter_rows(max_row=1))]
+            # Старые накопительные реестры создавались без колонки «Адресат».
+            # Мигрируем атомарно под тем же lock перед append: старые строки
+            # останутся пустыми и трактуются daemon'ом как legacy-Басманов.
+            if "Адресат" not in headers:
+                new_col = len(headers) + 1
+                ws.cell(row=1, column=new_col, value="Адресат")
+                ws.cell(row=1, column=new_col).font = openpyxl.styles.Font(bold=True)
+                ws.column_dimensions[
+                    openpyxl.utils.get_column_letter(new_col)
+                ].width = 34
+                headers.append("Адресат")
             row = [values.get(h, "") for h in headers]
             ws.append(row)
             format_registry_before_save(ws, path, changed_row=ws.max_row)
@@ -474,6 +494,29 @@ def _parse_one_msg(msg_path, process_mode="mix"):
     # «Фамилия», а обязательные Имя/Отчество получают прочерки.
     # Парсим ТОЛЬКО если не ZHKH (zhkh > feedback по приоритету).
     feedback = None if zhkh else parse_feedback_body(body, subject=subject)
+
+    addressees_override = None
+    zhkh_topic_code = None
+    if zhkh:
+        try:
+            addressees_override, zhkh_topic_code = resolve_addressee_override(
+                zhkh.get("тема_обращения"),
+                settings.get(
+                    "zhkh_addressee_routes",
+                    cfg.DEFAULTS["zhkh_addressee_routes"],
+                ),
+            )
+        except ValueError as exc:
+            log.error(
+                f"{os.path.basename(msg_path)}: некорректная маршрутизация "
+                f"ГИС ЖКХ — {exc}; письмо не будет отправлено случайному адресату"
+            )
+            return None
+        if addressees_override:
+            log.info(
+                f"{os.path.basename(msg_path)}: тема ГИС ЖКХ "
+                f"{zhkh_topic_code} → адресат {', '.join(addressees_override)}"
+            )
 
     force_draft = False
     if zhkh:
@@ -606,6 +649,12 @@ def _parse_one_msg(msg_path, process_mode="mix"):
         # срок ГИС)). Этот же срок уходит в контрольную дату резолюции.
         # Fallback на сырую дату ГИС если вычисление не удалось.
         "планируемая_дата": (zhkh_deadline or zhkh.get('планируемая_дата')) if zhkh else None,
+        "тема_обращения":   zhkh.get('тема_обращения') if zhkh else None,
+        "zhkh_topic_code":  zhkh_topic_code,
+        "addressees_override": addressees_override,
+        # Прямые тематические маршруты не принадлежат цепочке
+        # Басманов → Халецкая → округ и должны быть исключены из её daemon'ов.
+        "skip_legacy_resolution_chain": bool(addressees_override),
     }
 
 
