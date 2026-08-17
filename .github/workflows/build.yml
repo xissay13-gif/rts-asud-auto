@@ -82,5 +82,5 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: asud
+        name: asud-rc9-gis-zhukov
         path: dist/asud.zip
