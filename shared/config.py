@@ -10,7 +10,7 @@ import sys
 import json
 import logging
 
-from shared.zhkh_routing import DEFAULT_ZHKH_ADDRESSEE_ROUTES
+from shared.zhkh_routing import DEFAULT_ZHKH_EXCLUDED_TOPICS
 
 log = logging.getLogger("asud.config")
 
@@ -22,10 +22,9 @@ DEFAULTS = {
     "addressees": [
         "Басманов Александр Владимирович",
     ],
-    # Точечная маршрутизация ГИС ЖКХ по ПОЛНОМУ названию темы. Цифровые
-    # ключи — номера из бизнес-таблицы; текущий MSG хранит только название.
-    # Совпавшее правило полностью заменяет общий список addressees.
-    "zhkh_addressee_routes": DEFAULT_ZHKH_ADDRESSEE_ROUTES,
+    # Эти темы ГИС ЖКХ вообще не регистрируются в АСУД. Совпадение идёт по
+    # полному названию: текущий MSG не содержит цифровой код темы.
+    "zhkh_excluded_topics": DEFAULT_ZHKH_EXCLUDED_TOPICS,
     "unknown_correspondent": "Неизвестный Неизвестный Неизвестный",
     "delivery_method": "Электронная почта",
     "sheet_name": "Лист2",
