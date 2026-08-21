@@ -253,9 +253,12 @@ def _safe_field(msg, attr, msg_path, prop_id):
 # «Отписано в округ» — после прогона clean-resolutions).
 _REGISTRY_HEADERS = ["Номер", "Link", "Округ", "Subject", "Body",
                      "Дата получения", "Планируемая дата", "Статус",
-                     "Отписано Халецкой", "Отписано в округ"]
+                     "Отписано Халецкой", "Отписано в округ",
+                     "GIS Номер обращения", "External GUID"]
 _REGISTRY_WIDTHS = {1: 18, 2: 22, 3: 8, 4: 50, 5: 60, 6: 16, 7: 16, 8: 28,
-                    9: 18, 10: 18}
+                    9: 18, 10: 18, 11: 24, 12: 38}
+
+_API_REGISTRY_HEADERS = ("GIS Номер обращения", "External GUID")
 
 
 def _xlsx_path(base_dir, suffix=None, target_folder=None):
@@ -368,17 +371,218 @@ def _append_dated_row(path, doc, asud_id, status="OK"):
         log.warning(f"Не удалось записать строку в {path}: {e}")
 
 
+def _api_registry_values(doc, asud_id, external_guid):
+    """Builds the strict registry row used only by the GIS API backend."""
+    gis_number = str(doc.get("номер_обращения") or "").strip()
+    external_guid = str(external_guid or "").strip()
+    asud_id = str(asud_id or "").strip()
+    if not gis_number:
+        raise ValueError("у ГИС ЖКХ документа отсутствует номер обращения")
+    if not external_guid:
+        raise ValueError("API не вернул External GUID")
+    if not asud_id:
+        raise ValueError("API не вернул регистрационный номер АСУД")
+
+    received = _parse_ddmmyyyy(doc.get("дата_обращения"))
+    received_text = received.strftime("%d.%m.%Y") if received else ""
+    timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    return {
+        "Номер": asud_id,
+        "Link": doc.get("link") or "",
+        "Округ": doc.get("округ_прогноз") or "",
+        "Subject": doc.get("тема") or "",
+        "Body": doc.get("содержание") or "",
+        "Дата получения": received_text,
+        "Планируемая дата": doc.get("планируемая_дата") or "",
+        "Статус": f"Зарегистрирован {timestamp}",
+        "GIS Номер обращения": gis_number,
+        "External GUID": external_guid,
+    }
+
+
+def _upsert_api_dated_row(path, doc, asud_id, external_guid):
+    """Idempotently writes a successfully registered GIS API document.
+
+    The normal Selenium path deliberately continues to use append.  The API
+    path has a durable external GUID and therefore can safely resume local
+    finalisation after a crash without creating a second daemon work item.
+    Existing resolution columns are never overwritten.
+    """
+    values = _api_registry_values(doc, asud_id, external_guid)
+    temp_path = path + ".asud_api.tmp.xlsx"
+
+    with xlsx_lock(path, timeout=60):
+        if os.path.isfile(path):
+            workbook = openpyxl.load_workbook(path)
+            worksheet = workbook.active
+        else:
+            workbook = openpyxl.Workbook()
+            worksheet = workbook.active
+            worksheet.title = "Резолюции"
+            worksheet.append(_REGISTRY_HEADERS)
+            for column, width in _REGISTRY_WIDTHS.items():
+                worksheet.cell(row=1, column=column).font = (
+                    openpyxl.styles.Font(bold=True)
+                )
+                worksheet.column_dimensions[
+                    openpyxl.utils.get_column_letter(column)
+                ].width = width
+            worksheet.freeze_panes = "A2"
+
+        headers = [str(cell.value or "").strip()
+                   for cell in worksheet[1]]
+        nonempty_headers = [header for header in headers if header]
+        if len(nonempty_headers) != len(set(nonempty_headers)):
+            workbook.close()
+            raise ValueError("в реестре есть повторяющиеся названия колонок")
+
+        # Older registries are extended in place.  Their column order and all
+        # historical data stay untouched.
+        for header in _API_REGISTRY_HEADERS:
+            if header not in headers:
+                column = len(headers) + 1
+                cell = worksheet.cell(row=1, column=column, value=header)
+                cell.font = openpyxl.styles.Font(bold=True)
+                headers.append(header)
+                width = _REGISTRY_WIDTHS.get(
+                    _REGISTRY_HEADERS.index(header) + 1, 24)
+                worksheet.column_dimensions[
+                    openpyxl.utils.get_column_letter(column)].width = width
+
+        header_columns = {header: index + 1
+                          for index, header in enumerate(headers) if header}
+        # Old registries did not always contain every descriptive column.
+        # Preserve that adaptive legacy schema, but require all identity
+        # columns needed for a strict idempotent upsert.
+        required = {
+            "Номер", "Link", "GIS Номер обращения", "External GUID",
+        }
+        missing = sorted(required - set(header_columns))
+        if missing:
+            workbook.close()
+            raise ValueError(
+                "в реестре отсутствуют обязательные колонки: "
+                + ", ".join(missing)
+            )
+
+        guid_column = header_columns["External GUID"]
+        gis_column = header_columns["GIS Номер обращения"]
+        link_column = header_columns.get("Link")
+        number_column = header_columns.get("Номер")
+        wanted_guid = values["External GUID"]
+        wanted_gis = values["GIS Номер обращения"]
+        wanted_link = str(values.get("Link") or "").strip()
+        wanted_number = str(values["Номер"] or "").strip()
+
+        primary_matches = []
+        legacy_matches = []
+        for row_index in range(2, worksheet.max_row + 1):
+            row_guid = str(worksheet.cell(
+                row=row_index, column=guid_column).value or "").strip()
+            row_gis = str(worksheet.cell(
+                row=row_index, column=gis_column).value or "").strip()
+            guid_match = bool(row_guid and row_guid == wanted_guid)
+            gis_match = bool(row_gis and row_gis == wanted_gis)
+            if guid_match or gis_match:
+                if row_guid and row_guid != wanted_guid:
+                    workbook.close()
+                    raise ValueError(
+                        f"конфликт External GUID в строке {row_index}")
+                if row_gis and row_gis != wanted_gis:
+                    workbook.close()
+                    raise ValueError(
+                        f"конфликт номера ГИС ЖКХ в строке {row_index}")
+                primary_matches.append(row_index)
+                continue
+
+            # Backward compatibility for a row written before API columns
+            # existed.  Link alone is insufficient; the ASUD number must also
+            # agree so a timestamp collision cannot merge different records.
+            if (not row_guid and not row_gis and wanted_link
+                    and link_column and number_column):
+                row_link = str(worksheet.cell(
+                    row=row_index, column=link_column).value or "").strip()
+                row_number = str(worksheet.cell(
+                    row=row_index, column=number_column).value or "").strip()
+                if row_link == wanted_link and row_number == wanted_number:
+                    legacy_matches.append(row_index)
+
+        # A primary API row and a matching legacy row are still two records
+        # for the same document.  Do not silently prefer one: the operator
+        # must reconcile the duplicate before local finalisation can proceed.
+        matches = primary_matches + legacy_matches
+        if len(matches) > 1:
+            workbook.close()
+            raise ValueError(
+                "в реестре найдено несколько строк для одного GIS документа"
+            )
+
+        if matches:
+            changed_row = matches[0]
+            existing_number = str(worksheet.cell(
+                row=changed_row, column=number_column).value or ""
+            ).strip()
+            if existing_number and existing_number != wanted_number:
+                workbook.close()
+                raise ValueError(
+                    "конфликт регистрационного номера АСУД в строке "
+                    f"{changed_row}: {existing_number!r} != "
+                    f"{wanted_number!r}"
+                )
+        else:
+            changed_row = worksheet.max_row + 1
+
+        for header, value in values.items():
+            if header not in header_columns:
+                continue
+            worksheet.cell(
+                row=changed_row,
+                column=header_columns[header],
+                value=value,
+            )
+
+        format_registry_before_save(
+            worksheet, path, changed_row=changed_row)
+        try:
+            workbook.save(temp_path)
+            workbook.close()
+            os.replace(temp_path, path)
+        except Exception:
+            workbook.close()
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+            raise
+
+    return changed_row
+
+
 def _list_root_msgs(folder_path):
     """Возвращает sorted list абсолютных путей к .msg в корне folder_path
     (без рекурсии). Пустой list если папки нет / I/O ошибка."""
     try:
         out = []
+        recover_api_state = _api_backend_selected()
         for f in os.listdir(folder_path):
             full = os.path.join(folder_path, f)
-            terminal_marker = full + ".asud_terminal.json"
-            if (os.path.isfile(full) and f.lower().endswith('.msg')
-                    and not os.path.isfile(terminal_marker)):
-                out.append(full)
+            if not (os.path.isfile(full) and f.lower().endswith('.msg')):
+                continue
+            terminal = os.path.isfile(full + ".asud_terminal.json")
+            claim = os.path.isfile(full + ".asud_api.claim")
+            state = os.path.isfile(full + ".asud_api_state.json")
+            if terminal:
+                continue
+            if claim or state:
+                # Only a complete write-ahead pair is safe to replay through
+                # the API recovery path.  It performs no network mutation and
+                # only finishes local XLSX/terminal state.  A lone sidecar is
+                # kept fail-closed for manual inspection in every backend.
+                if recover_api_state and claim and state:
+                    out.append(full)
+                continue
+            out.append(full)
         return sorted(out)
     except OSError as e:
         log.error(f"Не могу прочитать папку {folder_path}: {e}")
@@ -417,6 +621,201 @@ def _write_terminal_marker(msg_path, status, reason, **metadata):
             pass
         log.error(f"Не удалось записать terminal-маркер для {msg_path}: {exc}")
         return None
+
+
+def _email_registration_backend():
+    backend = str(os.environ.get(
+        "ASUD_EMAIL_REGISTRATION_BACKEND", "selenium")
+    ).strip().casefold()
+    if backend not in {"selenium", "asud_api"}:
+        raise ValueError(
+            "ASUD_EMAIL_REGISTRATION_BACKEND must be selenium or asud_api"
+        )
+    return backend
+
+
+def _api_backend_selected():
+    return _email_registration_backend() == "asud_api"
+
+
+def _api_external_guid(outcome, doc):
+    """Returns the public GUID exposed by core without inspecting its state."""
+    value = getattr(outcome, "external_guid", None)
+    if not value:
+        value = doc.get("asud_api_external_guid")
+    return str(value or "").strip()
+
+
+def _mark_api_terminal(msg_path, status, reason, outcome=None, **metadata):
+    """Durably stops automatic API/Selenium processing while keeping MSG.
+
+    Keeping the original MSG in the source root is intentional: the external
+    GIS downloader uses it for deduplication.  The adjacent terminal marker is
+    what hides it from this program's scanner.
+    """
+    outcome_metadata = {}
+    if outcome is not None:
+        outcome_metadata = {
+            "object_id": getattr(outcome, "object_id", None),
+            "registration_number": getattr(
+                outcome, "registration_number", None),
+            "state_path": str(getattr(outcome, "state_path", None) or "")
+                          or None,
+        }
+    outcome_metadata.update(metadata)
+    marker = _write_terminal_marker(
+        msg_path,
+        status,
+        reason,
+        **outcome_metadata,
+    )
+    if not marker:
+        raise ExclusionMarkerError(
+            "не удалось записать terminal-маркер API; "
+            "автоматическая обработка остановлена"
+        )
+    return marker
+
+
+def _process_doc_via_gis_api(doc, base_dir, folder, output_suffix):
+    """Runs the isolated GIS API backend and maps its durable outcome.
+
+    This function never calls Selenium and never falls back to it.  All
+    uncertain post-submission statuses get a durable terminal marker before
+    control returns to the generic one-shot summary.
+    """
+    msg_path = doc.get("файл")
+    doc["_processed_via_asud_api"] = True
+
+    from flows.gis_api import process_gis_document, should_use_gis_api
+
+    if not should_use_gis_api(doc, settings):
+        # The backend was explicitly selected, so passing a non-GIS message to
+        # Selenium would be a dangerous implicit fallback.
+        reason = (
+            "API backend выбран, но письмо не распознано структурным "
+            "парсером ГИС ЖКХ; Selenium fallback запрещён"
+        )
+        log.error(reason)
+        return "API_FAILED", None, None
+
+    try:
+        outcome = process_gis_document(
+            doc,
+            settings,
+            logger=log,
+        )
+    except Exception as exc:
+        # Core is expected to classify known pre/post mutation failures.  An
+        # uncaught exception has unknown delivery semantics, therefore it is
+        # terminal rather than retryable.
+        reason = f"Непредвиденная ошибка GIS API: {exc}"
+        log.exception(reason)
+        _mark_api_terminal(
+            msg_path,
+            "MANUAL_REVIEW",
+            reason,
+        )
+        return "MANUAL_REVIEW", None, None
+
+    raw_status = getattr(outcome, "status", "")
+    status = str(getattr(raw_status, "value", raw_status) or "").strip().upper()
+    object_id = str(getattr(outcome, "object_id", None) or "").strip()
+    registration_number = str(
+        getattr(outcome, "registration_number", None) or ""
+    ).strip()
+    message = str(getattr(outcome, "message", None) or status).strip()
+
+    if status == "OK":
+        external_guid = _api_external_guid(outcome, doc)
+        written_xlsx = _xlsx_path(
+            base_dir, output_suffix, target_folder=folder)
+        try:
+            _upsert_api_dated_row(
+                written_xlsx,
+                doc,
+                registration_number,
+                external_guid,
+            )
+        except Exception as exc:
+            reason = (
+                "API завершил регистрацию, но строгая финализация XLSX "
+                f"не выполнена: {exc}"
+            )
+            log.error(reason)
+            _mark_api_terminal(
+                msg_path,
+                "MANUAL_REVIEW",
+                reason,
+                outcome=outcome,
+                external_guid=external_guid or None,
+                gis_number=doc.get("номер_обращения"),
+            )
+            return (
+                "MANUAL_REVIEW",
+                registration_number or object_id or None,
+                None,
+            )
+
+        _mark_api_terminal(
+            msg_path,
+            "OK",
+            "GIS API: документ зарегистрирован и отправлен на резолюцию",
+            outcome=outcome,
+            external_guid=external_guid,
+            gis_number=doc.get("номер_обращения"),
+            registry_path=written_xlsx,
+        )
+        log.info(
+            f"GIS API: {registration_number} зарегистрирован; "
+            "MSG оставлен в корне с terminal-маркером"
+        )
+        return "OK", registration_number, written_xlsx
+
+    if status in {
+            "MANUAL_REVIEW", "SUBMISSION_UNKNOWN", "REGISTERED_ONLY"}:
+        _mark_api_terminal(
+            msg_path,
+            status,
+            message,
+            outcome=outcome,
+            external_guid=_api_external_guid(outcome, doc) or None,
+            gis_number=doc.get("номер_обращения"),
+        )
+        log.error(
+            f"GIS API: terminal status {status}; MSG оставлен в корне, "
+            "повтор и Selenium fallback запрещены"
+        )
+        return status, registration_number or object_id or None, None
+
+    if status in {"DRY_RUN", "PROBE"}:
+        log.info(
+            f"GIS API: {status}; сеть/мутации ограничены режимом, "
+            "terminal-маркер не создаётся"
+        )
+        return status, registration_number or object_id or None, None
+
+    if status == "FAILED":
+        # Core guarantees FAILED is pre-mutation and safe to repeat after the
+        # operator fixes configuration/connectivity.  Keep the MSG in place and
+        # use a distinct status so the legacy loop cannot move it to Ошибки/.
+        log.error(
+            f"GIS API: pre-mutation failure: {message}; "
+            "MSG оставлен в корне, повтор безопасен после исправления"
+        )
+        return "API_FAILED", None, None
+
+    reason = f"GIS API вернул неизвестный статус {status!r}: {message}"
+    log.error(reason)
+    _mark_api_terminal(
+        msg_path,
+        "MANUAL_REVIEW",
+        reason,
+        outcome=outcome,
+        external_guid=_api_external_guid(outcome, doc) or None,
+        gis_number=doc.get("номер_обращения"),
+    )
+    return "MANUAL_REVIEW", registration_number or object_id or None, None
 
 
 def _exclude_msg_from_asud(msg_path, doc):
@@ -726,7 +1125,8 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
     при параллельных запусках двух пресетов).
 
     Возвращает финальный статус: 'OK' | 'DUPLICATE' | 'DRAFT' | 'EXCLUDED' |
-    'REGISTERED_ONLY' | 'SUBMISSION_UNKNOWN' | 'FAILED'.
+    'REGISTERED_ONLY' | 'SUBMISSION_UNKNOWN' | 'FAILED' либо API-only статусы
+    'DRY_RUN' | 'PROBE' | 'MANUAL_REVIEW' | 'API_FAILED'.
     in_daemon=True (mix-режим): DRAFT → перенос в Черновики/.
     """
     msg_path = doc.get("файл")
@@ -741,6 +1141,21 @@ def _process_doc(driver, doc, base_dir, folder, index, total, in_daemon,
                 "не удалось записать marker исключения; вход в АСУД запрещён"
             )
         return "EXCLUDED", None, None
+
+    # Explicit API backend is isolated from Selenium.  Structurally invalid
+    # messages are rejected inside the API adapter; they never fall through to
+    # mix.create_one_document().
+    if _api_backend_selected():
+        if in_daemon:
+            raise RuntimeError(
+                "GIS API backend поддерживает только однопроходный режим"
+            )
+        return _process_doc_via_gis_api(
+            doc,
+            base_dir,
+            folder,
+            output_suffix,
+        )
 
     if process_mode == "smart" and doc.get("корр_источник") not in ("zhkh", "feedback"):
         # Smart-пресет: каждый .msg создаётся как черновик с фикс. корреспондентом.
@@ -802,6 +1217,7 @@ def main():
 
     # Читаем логику обработки сразу — нужно для корректного превью
     process_mode = os.environ.get('ASUD_EMAIL_PROCESS_MODE', 'mix')
+    api_backend = _api_backend_selected()
 
     log.info("=" * 50)
     log.info("АСУД ИК — Email-direct (создание из .msg-писем)")
@@ -837,8 +1253,42 @@ def main():
         input("Enter...")
         sys.exit(1)
 
-    # Превью — зависит от process_mode
-    if process_mode == "smart":
+    if api_backend:
+        non_gis = [doc for doc in docs
+                   if doc.get("корр_источник") != "zhkh"]
+        api_eligible = [doc for doc in docs
+                        if (doc.get("корр_источник") == "zhkh"
+                            and not doc.get("skip_asud_registration"))]
+        if non_gis or len(api_eligible) > 1:
+            if non_gis:
+                log.critical(
+                    "GIS API preflight: в очереди есть не-ГИС письма "
+                    f"({len(non_gis)}). Вся партия отклонена; "
+                    "Selenium fallback запрещён."
+                )
+            if len(api_eligible) > 1:
+                log.critical(
+                    "GIS API preflight: найдено "
+                    f"{len(api_eligible)} обращений для API, а live-one "
+                    "разрешает максимум одно. Вся партия отклонена до "
+                    "первого API-вызова."
+                )
+            cfg.keep_system_awake(False)
+            input("Enter для закрытия...")
+            return
+
+    # Превью — зависит от backend/process_mode
+    if api_backend:
+        structured = sum(
+            1 for doc in docs if doc.get("корр_источник") == "zhkh")
+        print(f"\nПервые 5 (тестовый backend GIS API, без Edge):")
+        for i, doc in enumerate(docs[:5], 1):
+            flag = "GIS" if doc.get("корр_источник") == "zhkh" else "НЕ GIS"
+            print(f"  {i}. [{flag}] {doc['тема'][:70]}")
+        print(f"\nВсего: {len(docs)}  (структурно ГИС ЖКХ: {structured})")
+        print("режим: GIS API ONE-SHOT — Selenium fallback запрещён; "
+              "MSG остаются в корне")
+    elif process_mode == "smart":
         print(f"\nПервые 5 (все будут созданы как ЧЕРНОВИКИ):")
         for i, d in enumerate(docs[:5], 1):
             print(f"  {i}. [тип {d['тип_индекс']}] {d['тема'][:60]}")
@@ -860,37 +1310,49 @@ def main():
     if input("Начать? (да/нет): ").strip().lower() not in ("да", "д", "y", "yes", ""):
         sys.exit(0)
 
-    # === Запуск браузера и обработки (повторяем mix-loop, но с нашими docs)
-    driver_path = os.path.join(base_dir, "msedgedriver.exe")
-    if not os.path.exists(driver_path):
-        log.error(f"msedgedriver.exe не найден в {base_dir}")
-        input("Enter...")
-        sys.exit(1)
+    # === Запуск обработки. API one-shot intentionally does not require Edge.
+    driver = None
+    if not api_backend:
+        driver_path = os.path.join(base_dir, "msedgedriver.exe")
+        if not os.path.exists(driver_path):
+            log.error(f"msedgedriver.exe не найден в {base_dir}")
+            input("Enter...")
+            sys.exit(1)
 
-    options = cfg.build_edge_options()
-    service = EdgeService(executable_path=driver_path)
-    driver = webdriver.Edge(service=service, options=options)
-    set_driver_timeout(driver, settings.get("asud_load_timeout_sec",
-                                              cfg.DEFAULTS["asud_load_timeout_sec"]))
+        options = cfg.build_edge_options()
+        service = EdgeService(executable_path=driver_path)
+        driver = webdriver.Edge(service=service, options=options)
+        set_driver_timeout(
+            driver,
+            settings.get(
+                "asud_load_timeout_sec",
+                cfg.DEFAULTS["asud_load_timeout_sec"],
+            ),
+        )
 
-    # Настраиваем mix_flow.settings — он использует module-level global
+    # Настраиваем mix_flow.settings — legacy Selenium path uses this global.
     mix_flow.settings = settings
 
     output_suffix = os.environ.get('ASUD_OUTPUT_SUFFIX') or None
     log.info(f"Логика обработки: {process_mode}"
+             + (", backend: asud_api (one-shot)" if api_backend else "")
              + (f", суффикс реестра: {output_suffix}" if output_suffix else ""))
 
     try:
         url = settings.get("asud_url", cfg.DEFAULTS["asud_url"])
-        log.info(f"Открываю {url}")
-        driver.get(url)
-        wait_asud_loaded(driver)
+        if driver is not None:
+            log.info(f"Открываю {url}")
+            driver.get(url)
+            wait_asud_loaded(driver)
+        else:
+            log.info("GIS API backend: Edge/msedgedriver не запускаются")
 
         # Per-date реестры: Registered/YYYY-MM-DD[_<suffix>]_резолюции.xlsx.
         # Каждый doc пишется в xlsx своей даты (из имени .msg).
         log.info(f"Per-date реестры в: {os.path.join(base_dir, 'Registered')}")
 
-        done_count, dup_count, draft_count, excluded_count, err_count = 0, 0, 0, 0, 0
+        done_count = dup_count = draft_count = excluded_count = err_count = 0
+        dry_run_count = probe_count = manual_review_count = api_failed_count = 0
         # Просто счётчик зарегистрированных ГИСЖКХ — для итогового лога.
         # Сама отписка делается отдельным процессом
         # (АСУД_ЖКХ_резолюции_Халецкой.bat).
@@ -913,6 +1375,25 @@ def main():
                     draft_count += 1
                 elif status == "EXCLUDED":
                     excluded_count += 1
+                elif status == "DRY_RUN":
+                    dry_run_count += 1
+                elif status == "PROBE":
+                    probe_count += 1
+                elif status == "API_FAILED":
+                    api_failed_count += 1
+                    err_count += 1
+                    log.error(
+                        "GIS API не выполнял мутаций; MSG оставлен в корне. "
+                        "Исправьте конфигурацию/доступ и повторите безопасно."
+                    )
+                elif (status in {
+                        "MANUAL_REVIEW", "REGISTERED_ONLY",
+                        "SUBMISSION_UNKNOWN"}
+                      and doc.get("_processed_via_asud_api")):
+                    # `_process_doc_via_gis_api` already persisted a terminal
+                    # marker.  Never move the MSG or append an uncertain row.
+                    manual_review_count += 1
+                    err_count += 1
                 elif status in {"REGISTERED_ONLY", "SUBMISSION_UNKNOWN"}:
                     reason = (
                         "Документ зарегистрирован, но резолюция не подтверждена"
@@ -943,14 +1424,30 @@ def main():
                 break
             except Exception as e:
                 log.error(f"ОШИБКА документ {i}: {e}")
-                move_to_errors(msg_path, folder, f"Exception: {e}")
                 err_count += 1
                 _print_doc_line(i, len(docs), "FAILED", str(e)[:80])
-                try:
-                    driver.get(url)
-                    wait_asud_loaded(driver)
-                except Exception:
-                    pass
+                if doc.get("_processed_via_asud_api"):
+                    # Unknown API delivery must never become a Selenium retry
+                    # or move out of the downloader's deduplication root.
+                    try:
+                        _mark_api_terminal(
+                            msg_path,
+                            "MANUAL_REVIEW",
+                            f"Непредвиденная ошибка интеграции после API: {e}",
+                        )
+                    except ExclusionMarkerError:
+                        log.critical(
+                            "API terminal-маркер не записан — "
+                            "останавливаю обработку"
+                        )
+                    break
+                move_to_errors(msg_path, folder, f"Exception: {e}")
+                if driver is not None:
+                    try:
+                        driver.get(url)
+                        wait_asud_loaded(driver)
+                    except Exception:
+                        pass
                 continue
 
         elapsed_seconds = time.monotonic() - start_time
@@ -958,29 +1455,64 @@ def main():
         avg = (timedelta(seconds=int(elapsed_seconds / done_count))
                if done_count else None)
         # Лог-файл — плоский (без ANSI), консоль — цветной
-        plain = [
-            "",
-            "=" * 60,
-            "ГОТОВО!",
-            f"  Обработано:   {done_count} / {len(docs)}  (→ Завершено/)",
-            f"  Дубликаты:    {dup_count}  (уже были в АСУД, → Завершено/)",
-            f"  В черновиках: {draft_count}  (ФИО не найдено, .msg остался в корне)",
-            f"  Исключено:    {excluded_count}  (в АСУД не передавались)",
-            f"  Ошибок:       {err_count}  (→ Ошибки/)",
-            f"  Затрачено:    {elapsed}" + (f"  (в среднем {avg}/док)" if avg else ""),
-            "=" * 60,
-        ]
+        if api_backend:
+            plain = [
+                "",
+                "=" * 60,
+                "ГОТОВО — GIS API ONE-SHOT",
+                f"  API OK:       {done_count} / {len(docs)}  "
+                "(MSG + terminal-marker в корне)",
+                f"  Dry-run:      {dry_run_count}  (без marker, можно повторить)",
+                f"  Probe:        {probe_count}  (без marker, можно повторить)",
+                f"  Ручная проверка: {manual_review_count}  "
+                "(terminal-marker, автоповтор запрещён)",
+                f"  API до мутации: {api_failed_count} ошибок  "
+                "(без marker, повтор безопасен после исправления)",
+                f"  Исключено:    {excluded_count}  (в АСУД не передавались)",
+                f"  Всего ошибок: {err_count}  (MSG не перемещались)",
+                f"  Затрачено:    {elapsed}"
+                + (f"  (в среднем {avg}/док)" if avg else ""),
+                "=" * 60,
+            ]
+        else:
+            plain = [
+                "",
+                "=" * 60,
+                "ГОТОВО!",
+                f"  Обработано:   {done_count} / {len(docs)}  (→ Завершено/)",
+                f"  Дубликаты:    {dup_count}  (уже были в АСУД, → Завершено/)",
+                f"  В черновиках: {draft_count}  (ФИО не найдено, .msg остался в корне)",
+                f"  Исключено:    {excluded_count}  (в АСУД не передавались)",
+                f"  Ошибок:       {err_count}  (→ Ошибки/)",
+                f"  Затрачено:    {elapsed}"
+                + (f"  (в среднем {avg}/док)" if avg else ""),
+                "=" * 60,
+            ]
         for line in plain:
             log.info(line)
         print("")
         print("=" * 60)
-        print("ГОТОВО!")
-        print(f"  Обработано:   {green(str(done_count))} / {len(docs)}  (→ Завершено/)")
-        print(f"  Дубликаты:    {dup_count}  (уже были в АСУД, → Завершено/)")
-        print(f"  В черновиках: {yellow(str(draft_count))}  (ФИО не найдено, .msg в корне)")
-        print(f"  Исключено:    {yellow(str(excluded_count))}  (в АСУД не передавались)")
-        print(f"  Ошибок:       {red(str(err_count))}  (→ Ошибки/)")
-        print(f"  Затрачено:    {elapsed}" + (f"  (в среднем {avg}/док)" if avg else ""))
+        if api_backend:
+            print("ГОТОВО — GIS API ONE-SHOT")
+            print(f"  API OK:       {green(str(done_count))} / {len(docs)}  "
+                  "(MSG + marker в корне)")
+            print(f"  Dry-run:      {yellow(str(dry_run_count))}  (без marker)")
+            print(f"  Probe:        {yellow(str(probe_count))}  (без marker)")
+            print(f"  Ручная проверка: {red(str(manual_review_count))}  "
+                  "(автоповтор запрещён)")
+            print(f"  API до мутации: {red(str(api_failed_count))} ошибок  "
+                  "(повтор безопасен после исправления)")
+            print(f"  Исключено:    {yellow(str(excluded_count))}")
+            print(f"  Всего ошибок: {red(str(err_count))}  (MSG не перемещались)")
+        else:
+            print("ГОТОВО!")
+            print(f"  Обработано:   {green(str(done_count))} / {len(docs)}  (→ Завершено/)")
+            print(f"  Дубликаты:    {dup_count}  (уже были в АСУД, → Завершено/)")
+            print(f"  В черновиках: {yellow(str(draft_count))}  (ФИО не найдено, .msg в корне)")
+            print(f"  Исключено:    {yellow(str(excluded_count))}  (в АСУД не передавались)")
+            print(f"  Ошибок:       {red(str(err_count))}  (→ Ошибки/)")
+        print(f"  Затрачено:    {elapsed}"
+              + (f"  (в среднем {avg}/док)" if avg else ""))
         print("=" * 60)
 
         # Раньше тут запускался ZHKH-второй проход (Басманов → резолюции
@@ -997,10 +1529,11 @@ def main():
         log.error(f"Ошибка: {e}")
         input("Enter...")
     finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
         cfg.keep_system_awake(False)
 
 
@@ -1046,6 +1579,14 @@ def daemon_main():
                                     cfg.DEFAULTS["email_max_retries"]))
     process_mode = os.environ.get('ASUD_EMAIL_PROCESS_MODE', 'mix')
     output_suffix = os.environ.get('ASUD_OUTPUT_SUFFIX') or None
+
+    if _api_backend_selected():
+        log.critical(
+            "GIS API backend поддерживает только однопроходный запуск. "
+            "WATCH/daemon остановлен до запуска Edge и до обработки MSG."
+        )
+        cfg.keep_system_awake(False)
+        raise SystemExit(2)
 
     # Multi-folder режим — пресет с "folders" списком вместо "folder" строки.
     # Если ASUD_EMAIL_FOLDERS_JSON задан, обрабатываем все эти папки
@@ -1114,7 +1655,8 @@ def daemon_main():
     log.info(f"Опрос: каждые {interval} сек, макс retry: {max_retries}")
     print(f"\nМониторинг включён. Ctrl+C для остановки.")
 
-    # Browser
+    # Browser (API daemon has already failed closed above).
+    driver = None
     driver_path = os.path.join(base_dir, "msedgedriver.exe")
     if not os.path.exists(driver_path):
         log.error(f"msedgedriver.exe не найден в {base_dir}")
@@ -1315,10 +1857,11 @@ def daemon_main():
         print("=" * 60)
 
     finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
         cfg.keep_system_awake(False)
 
 
