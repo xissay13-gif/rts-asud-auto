@@ -87,10 +87,16 @@ class ApiPresetTests(unittest.TestCase):
         }.intersection(api))
 
     def test_live_confirmation_cannot_be_inherited_from_environment(self):
-        bat = Path("asud_gis_api_test.bat").read_text(encoding="utf-8")
+        path = Path("asud_gis_api_test.bat")
+        raw = path.read_bytes()
+        self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
+        self.assertIn(b"\r\n", raw)
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
+
+        bat = raw.decode("utf-8")
         prompt = 'set /p "ASUD_API_CONFIRM=Для запуска введите LIVE-ONE: "'
 
-        self.assertIn('set "ASUD_API_CONFIRM="\n' + prompt, bat)
+        self.assertIn('set "ASUD_API_CONFIRM="\r\n' + prompt, bat)
 
 
 if __name__ == "__main__":
