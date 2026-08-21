@@ -244,6 +244,24 @@ def main():
         # ASUD_EMAIL_PROCESS_MODE — для email-flow: 'mix' (текущая логика) или
         # 'smart' (всегда черновик + фикс. корреспондент).
         os.environ['ASUD_EMAIL_PROCESS_MODE'] = preset.get("mode", "mix")
+        # Отдельный backend регистрации нужен только экспериментальному
+        # пресету ГИС ЖКХ. Сам backend задаёт выбранный preset; отдельные
+        # ASUD_API_* разрешения/режим из BAT по-прежнему имеют приоритет над
+        # безопасными значениями preset/settings.
+        if "registration_backend" in preset:
+            backend = str(preset.get("registration_backend") or "").strip()
+            if backend:
+                # A selected preset is an explicit routing decision.  An
+                # ambient value from another BAT/session must not silently
+                # turn the API TEST preset back into Selenium (or vice versa).
+                os.environ['ASUD_EMAIL_REGISTRATION_BACKEND'] = backend
+        if "asud_api_enabled" in preset:
+            enabled = preset.get("asud_api_enabled")
+            if isinstance(enabled, str):
+                enabled = enabled.strip().casefold() in (
+                    "1", "true", "yes", "on", "да")
+            os.environ.setdefault(
+                'ASUD_API_ENABLED', '1' if enabled else '0')
         # ASUD_OUTPUT_SUFFIX — суффикс в имени per-date xlsx (для разделения
         # реестров при параллельных запусках двух .bat).
         if preset.get("output_suffix"):

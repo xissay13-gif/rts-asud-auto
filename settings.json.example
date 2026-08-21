@@ -1,7 +1,7 @@
 {
   "_comment": "Шаблон settings.json. Скопируй и переименуй в settings.json рядом с asud.exe — exe подхватит без пересборки. Любой ключ можно убрать — будет взято значение по умолчанию из DEFAULTS в коде. config.json (старое имя) тоже работает — для обратной совместимости.",
 
-  "_comment_presets": "Каждый пресет — отдельный сценарий в меню при запуске asud.exe без флагов. Поля: name (как показать), mode (mix/smart/auto-create/email), folder (источник .msg для email-flow — ОДНА папка) ИЛИ folders (список папок для round-robin мониторинга), xlsx (путь к реестру для mix/auto-create/smart), outlook_dir (папка где искать .msg по Link для mix-вложений; может совпадать с folder или нет), output_suffix (добавляется в имя per-date xlsx чтобы не конфликтовали реестры разных пресетов), round_robin (true — в watch-режиме обходит folders по очереди; false — все папки на каждом тике), delete_after_done (по умолчанию true — обработанные .msg удаляются; поставь false если хочешь бэкап в Завершено/).",
+  "_comment_presets": "Каждый пресет — отдельный сценарий в меню при запуске asud.exe без флагов. Поля: name (как показать), mode (mix/smart/auto-create/email), folder (источник .msg для email-flow — ОДНА папка) ИЛИ folders (список папок для round-robin мониторинга), xlsx (путь к реестру для mix/auto-create/smart), outlook_dir (папка где искать .msg по Link для mix-вложений; может совпадать с folder или нет), output_suffix (добавляется в имя per-date xlsx чтобы не конфликтовали реестры разных пресетов), round_robin (true — в watch-режиме обходит folders по очереди; false — все папки на каждом тике), delete_after_done (по умолчанию true — обработанные .msg удаляются; поставь false если хочешь бэкап в Завершено/), registration_backend/asud_api_enabled (только для отдельного API TEST пресета).",
   "presets": [
     {
       "name": "ОЭК — Smart (черновики)",
@@ -30,6 +30,17 @@
       "output_suffix": "ГИСЖКХ"
     },
     {
+      "id": "gis-api-test",
+      "name": "ГИС ЖКХ — API TEST (dry-run)",
+      "mode": "mix",
+      "folder": "D:\\OutlookSubjects\\ГИСЖКХ",
+      "outlook_dir": "D:\\OutlookSubjects\\ГИСЖКХ",
+      "output_suffix": "ГИСЖКХ_API_TEST",
+      "registration_backend": "asud_api",
+      "asud_api_enabled": false,
+      "delete_after_done": false
+    },
+    {
       "name": "Все потоки (round-robin) — Mix",
       "mode": "mix",
       "folders": [
@@ -51,6 +62,43 @@
   "_comment_intervals": "Интервалы в СЕКУНДАХ. email_watch_interval_sec — как часто email-daemon (--watch) опрашивает папку с .msg. По умолчанию 300 (5 минут).",
   "email_watch_interval_sec": 300,
   "email_max_retries": 3,
+
+  "_comment_asud_api": "ОПЫТНЫЙ РЕЖИМ ТОЛЬКО ДЛЯ ГИС ЖКХ. Без явного включения остаётся dry-run и ничего не меняет в АСУД. Заполни только подтверждённые владельцем API URL/пути и ID. Пароли/токены запрещено писать в settings.json: авторизация задаётся только переменными ASUD_API_AUTH_TYPE и соответствующими ASUD_API_* env (см. GIS_ZHKH_API_TEST.md).",
+  "_comment_asud_api_env": "Несекретные override'ы: ASUD_API_ENABLED, ASUD_API_MODE, ASUD_API_ALLOW_MUTATIONS, ASUD_API_MAX_DOCUMENTS, ASUD_API_BASE_URL, ASUD_API_FIND_OBJECTS2_URL, ASUD_API_FIND_APPOINTMENT_URL, ASUD_API_HANDLE_OBJECT_URL, ASUD_API_GET_OBJECT_URL, ASUD_API_EXECUTE_ACTION_URL, ASUD_API_TIMEOUT_SEC, ASUD_API_VERIFY_TLS, ASUD_API_LIS, ASUD_API_USER, ASUD_API_BRANCH_ID, ASUD_API_BRANCH_NAME, ASUD_API_INCOMING_TYPE_PATH, ASUD_API_ADDRESSEE_ID, ASUD_API_ADDRESSEE_NAME, ASUD_API_AUTHOR_ID, ASUD_API_AUTHOR_ATTRIBUTE, ASUD_API_DELIVERY_TYPE, ASUD_API_REGISTRATION_ACTION, ASUD_API_RESOLUTION_ACTION, ASUD_API_BRANCH_ATTRIBUTE, ASUD_API_CONFIRM_MSG_SUPPORTED, ASUD_API_MAX_ATTACHMENT_BYTES. Секреты только через ASUD_API_AUTH_TYPE + ASUD_API_BASIC_USERNAME/PASSWORD, ASUD_API_BEARER_TOKEN или ASUD_API_AUTH_HEADER_NAME/VALUE.",
+  "asud_api": {
+    "enabled": false,
+    "mode": "dry-run",
+    "allow_mutations": false,
+    "max_documents": 1,
+    "base_url": "",
+    "endpoints": {
+      "find_objects2": "",
+      "find_appointment": "",
+      "handle_object": "",
+      "get_object": "",
+      "execute_action": ""
+    },
+    "timeout_sec": 30,
+    "verify_tls": true,
+    "lis": "",
+    "user": "",
+    "branch_id": "",
+    "branch_name": "",
+    "incoming_type_path": "",
+    "addressee_id": "",
+    "addressee_name": "Басманов Александр Владимирович",
+    "author_id": "",
+    "author_attribute": "",
+    "delivery_type": "",
+    "registration_action": "registration",
+    "resolution_action": "",
+    "incoming_attributes": {},
+    "branch_attribute": "",
+    "attachment": {
+      "confirm_msg_supported": false,
+      "max_bytes": 0
+    }
+  },
 
   "asud_url": "https://asud.interrao.ru/asudik/",
   "unknown_correspondent": "Неизвестный Неизвестный Неизвестный",

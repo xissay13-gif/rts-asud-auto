@@ -39,6 +39,44 @@ DEFAULTS = {
     # Таймаут загрузки страниц ASUD (page_load + urllib3 client). 300с = 5 минут.
     # Поднят с дефолтных 120с т.к. ASUD иногда долго инициализируется.
     "asud_load_timeout_sec": 300,
+    # Экспериментальная регистрация ГИС ЖКХ через API. Она намеренно
+    # отключена и работает в dry-run, пока оператор явно не заполнит точные
+    # endpoint'ы/ID и не включит соответствующий тестовый режим. Учётные
+    # данные и токены здесь не хранятся — только в ASUD_API_* env.
+    "asud_api": {
+        "enabled": False,
+        "mode": "dry-run",
+        "allow_mutations": False,
+        "max_documents": 1,
+        "base_url": "",
+        "endpoints": {
+            "find_objects2": "",
+            "find_appointment": "",
+            "handle_object": "",
+            "get_object": "",
+            "execute_action": "",
+        },
+        "timeout_sec": 30,
+        "verify_tls": True,
+        "lis": "",
+        "user": "",
+        "branch_id": "",
+        "branch_name": "",
+        "incoming_type_path": "",
+        "addressee_id": "",
+        "addressee_name": "Басманов Александр Владимирович",
+        "author_id": "",
+        "author_attribute": "",
+        "delivery_type": "",
+        "registration_action": "registration",
+        "resolution_action": "",
+        "incoming_attributes": {},
+        "branch_attribute": "",
+        "attachment": {
+            "confirm_msg_supported": False,
+            "max_bytes": 0,
+        },
+    },
     # Регистрация файлов из выгрузки СБИС. Каждый файл становится отдельным
     # входящим документом; номер «б/н (N)» хранится в state рядом с файлами.
     "sbis": {
@@ -64,6 +102,8 @@ DEFAULTS = {
     #   output_suffix — добавляется в имя per-date реестра, чтобы
     #                    Registered/2026-05-12_ОЭК_резолюции.xlsx и
     #                    Registered/2026-05-12_ТЭС_резолюции.xlsx не конфликтовали.
+    #   registration_backend / asud_api_enabled — только для изолированного
+    #                    GIS API TEST preset; штатные пресеты их не задают.
     # Чтобы переопределить без пересборки — создать settings.json или
     # config.json рядом с exe (см. settings.json.example).
     "presets": [
@@ -87,6 +127,17 @@ DEFAULTS = {
             "folder": "D:\\OutlookSubjects\\ГИСЖКХ",
             "outlook_dir": "D:\\OutlookSubjects\\ГИСЖКХ",
             "output_suffix": "ГИСЖКХ",
+        },
+        {
+            "id": "gis-api-test",
+            "name": "ГИС ЖКХ — API TEST (dry-run)",
+            "mode": "mix",
+            "folder": "D:\\OutlookSubjects\\ГИСЖКХ",
+            "outlook_dir": "D:\\OutlookSubjects\\ГИСЖКХ",
+            "output_suffix": "ГИСЖКХ_API_TEST",
+            "registration_backend": "asud_api",
+            "asud_api_enabled": False,
+            "delete_after_done": False,
         },
         {
             "id": "sbis",
