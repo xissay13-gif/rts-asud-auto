@@ -10,7 +10,21 @@ import os
 import re
 import time
 import logging
+import mimetypes
+import tempfile
+import zipfile
+from email.message import EmailMessage
+from email.policy import SMTP
+from io import BytesIO
 from datetime import datetime, date
+
+import extract_msg
+from docx import Document
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt, RGBColor
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -18,6 +32,341 @@ from selenium.webdriver.support import expected_conditions as EC
 from shared.ui import click, wait_modal_closed, close_open_modals
 
 log = logging.getLogger("asud.attach")
+
+
+def _safe_msg_value(message, field, default=""):
+    """Читает поле MSG, не ломая упаковку на повреждённой метаинформации."""
+    if message is None:
+        return default
+    try:
+        value = getattr(message, field, default)
+    except Exception:
+        return default
+    if value is None:
+        return default
+    return str(value)
+
+
+def _safe_archive_stem(file_path):
+    """Делает короткое Windows-совместимое имя временного ZIP."""
+    stem = os.path.splitext(os.path.basename(file_path))[0]
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', stem).strip(' .')
+    return (stem or "Письмо")[:120]
+
+
+def _docx_text(value):
+    """Очищает текст от недопустимых в WordprocessingML управляющих символов."""
+    text = str(value or "")
+    text = text.encode("utf-8", errors="replace").decode("utf-8")
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+
+
+def _set_cell_margins(cell, *, top=90, start=110, bottom=90, end=110):
+    tc = cell._tc
+    tc_pr = tc.get_or_add_tcPr()
+    tc_mar = tc_pr.first_child_found_in("w:tcMar")
+    if tc_mar is None:
+        tc_mar = OxmlElement("w:tcMar")
+        tc_pr.append(tc_mar)
+    for margin, value in (
+            ("top", top), ("start", start), ("bottom", bottom), ("end", end)):
+        node = tc_mar.find(qn(f"w:{margin}"))
+        if node is None:
+            node = OxmlElement(f"w:{margin}")
+            tc_mar.append(node)
+        node.set(qn("w:w"), str(value))
+        node.set(qn("w:type"), "dxa")
+
+
+def _set_table_borders(table, color="D9D9D9", size="6"):
+    table_pr = table._tbl.tblPr
+    borders = table_pr.first_child_found_in("w:tblBorders")
+    if borders is None:
+        borders = OxmlElement("w:tblBorders")
+        table_pr.append(borders)
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        border = borders.find(qn(f"w:{edge}"))
+        if border is None:
+            border = OxmlElement(f"w:{edge}")
+            borders.append(border)
+        border.set(qn("w:val"), "single")
+        border.set(qn("w:sz"), size)
+        border.set(qn("w:space"), "0")
+        border.set(qn("w:color"), color)
+
+
+def _set_style_font(style, name):
+    """Закрепляет шрифт стиля для кириллицы во всех Word-рендерерах."""
+    style.font.name = name
+    r_pr = style._element.get_or_add_rPr()
+    r_fonts = r_pr.rFonts
+    if r_fonts is None:
+        r_fonts = OxmlElement("w:rFonts")
+        r_pr.insert(0, r_fonts)
+    for key in ("ascii", "hAnsi", "eastAsia", "cs"):
+        r_fonts.set(qn(f"w:{key}"), name)
+
+
+def _build_letter_docx(metadata, body):
+    """Создаёт компактный DOCX с реквизитами и полным текстом письма."""
+    document = Document()
+    section = document.sections[0]
+    section.page_width = Inches(8.5)
+    section.page_height = Inches(11)
+    section.top_margin = Inches(0.7)
+    section.bottom_margin = Inches(0.7)
+    section.left_margin = Inches(0.75)
+    section.right_margin = Inches(0.75)
+
+    normal = document.styles["Normal"]
+    _set_style_font(normal, "Arial")
+    normal.font.size = Pt(11)
+    normal.font.color.rgb = RGBColor(0, 0, 0)
+    normal.paragraph_format.space_after = Pt(6)
+    normal.paragraph_format.line_spacing = 1.08
+
+    title_style = document.styles["Title"]
+    _set_style_font(title_style, "Arial")
+    title_style.font.size = Pt(16)
+    title_style.font.bold = True
+    title_style.font.color.rgb = RGBColor(0, 0, 0)
+    title_p_pr = title_style._element.get_or_add_pPr()
+    title_border = title_p_pr.find(qn("w:pBdr"))
+    if title_border is not None:
+        title_p_pr.remove(title_border)
+
+    heading_style = document.styles["Heading 1"]
+    _set_style_font(heading_style, "Arial")
+    heading_style.font.size = Pt(12)
+    heading_style.font.bold = True
+    heading_style.font.color.rgb = RGBColor(0, 0, 0)
+
+    title = document.add_paragraph(style="Title")
+    title.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    title.paragraph_format.space_after = Pt(12)
+    title.add_run("Обращение")
+
+    rows = [(str(label), _docx_text(value)) for label, value in metadata]
+    table = document.add_table(rows=len(rows), cols=2)
+    table.autofit = False
+    table.columns[0].width = Inches(1.0)
+    table.columns[1].width = Inches(5.95)
+    _set_table_borders(table)
+    for index, (label, value) in enumerate(rows):
+        label_cell, value_cell = table.rows[index].cells
+        label_cell.width = Inches(1.0)
+        value_cell.width = Inches(5.95)
+        label_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        value_cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        _set_cell_margins(label_cell)
+        _set_cell_margins(value_cell)
+        label_paragraph = label_cell.paragraphs[0]
+        label_paragraph.paragraph_format.space_after = Pt(0)
+        label_paragraph.add_run(label).bold = True
+        value_paragraph = value_cell.paragraphs[0]
+        value_paragraph.paragraph_format.space_after = Pt(0)
+        value_paragraph.add_run(value)
+
+    spacer = document.add_paragraph()
+    spacer.paragraph_format.space_after = Pt(0)
+    heading = document.add_paragraph(style="Heading 1")
+    heading.paragraph_format.space_before = Pt(4)
+    heading.paragraph_format.space_after = Pt(6)
+    heading.add_run("Текст обращения")
+
+    cleaned_body = _docx_text(body).replace("\r\n", "\n").replace("\r", "\n")
+    if cleaned_body:
+        for line in cleaned_body.split("\n"):
+            paragraph = document.add_paragraph()
+            paragraph.paragraph_format.space_after = Pt(3 if line else 0)
+            if line:
+                paragraph.add_run(line)
+    else:
+        document.add_paragraph("Текст письма отсутствует")
+
+    output = BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
+def build_msg_zip(msg_path, output_path, *, subject=None, body=None):
+    """Упаковывает письмо в ZIP: ``Письмо.docx`` + все MSG-вложения.
+
+    ZIP сначала записывается во временный ``.partial`` и только после
+    успешного чтения всех вложений атомарно становится ``output_path``.
+    Поэтому в АСУД никогда не уйдёт недособранный архив.
+    """
+    source = os.path.abspath(os.fspath(msg_path))
+    target = os.path.abspath(os.fspath(output_path))
+    partial = f"{target}.partial"
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+
+    message = None
+    try:
+        message = extract_msg.openMsg(source)
+        effective_subject = (
+            str(subject) if subject is not None
+            else _safe_msg_value(message, "subject")
+        )
+        effective_body = (
+            str(body) if body is not None
+            else _safe_msg_value(message, "body")
+        )
+        metadata = [
+            ("Тема", effective_subject),
+            ("От", _safe_msg_value(message, "sender")),
+            ("Кому", _safe_msg_value(message, "to")),
+            ("Копия", _safe_msg_value(message, "cc")),
+            ("Дата", _safe_msg_value(message, "date")),
+        ]
+        letter_docx = _build_letter_docx(metadata, effective_body)
+
+        if os.path.exists(partial):
+            os.remove(partial)
+        with zipfile.ZipFile(
+                partial, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("Письмо.docx", letter_docx)
+            for attachment in (getattr(message, "attachments", None) or []):
+                # extract-msg сам очищает имя и устраняет конфликты имён.
+                # Вложенное письмо сохраняется как .msg, а не теряется.
+                attachment.save(
+                    zip=archive,
+                    customPath="Вложения",
+                    extractEmbedded=True,
+                )
+
+        os.replace(partial, target)
+        return target
+    except Exception:
+        try:
+            if os.path.exists(partial):
+                os.remove(partial)
+        except OSError:
+            pass
+        raise
+    finally:
+        if message is not None:
+            try:
+                message.close()
+            except Exception:
+                pass
+
+
+def _save_msg_attachments(message, target_dir):
+    """Извлекает все MSG-вложения во временную папку и возвращает пути.
+
+    Используем штатный ``extract-msg.save``: так обычные файлы и вложенные
+    письма сохраняются одинаково надёжно, а имена очищаются самой библиотекой.
+    """
+    root = os.path.abspath(os.fspath(target_dir))
+    os.makedirs(root, exist_ok=True)
+    saved = []
+    for attachment in (getattr(message, "attachments", None) or []):
+        result = attachment.save(
+            customPath=root,
+            extractEmbedded=True,
+        )
+        path = result[1] if isinstance(result, tuple) and len(result) > 1 else None
+        if not path:
+            continue
+        full_path = os.path.abspath(os.fspath(path))
+        try:
+            inside_root = os.path.commonpath((root, full_path)) == root
+        except ValueError:
+            inside_root = False
+        if not inside_root or not os.path.isfile(full_path):
+            raise ValueError(
+                f"extract-msg вернул небезопасный путь вложения: {full_path}"
+            )
+        saved.append(full_path)
+    return saved
+
+
+def build_msg_eml(msg_path, output_path, *, subject=None, body=None):
+    """Создаёт безопасный для АСУД EML-контейнер без внешнего ZIP.
+
+    Внутри EML находятся ``Обращение.docx`` и все исходные вложения письма.
+    Это сохраняет комплектность обращения, но не заставляет АСУД обрабатывать
+    ZIP, на скачивании которого его веб-интерфейс может зависнуть.
+    """
+    source = os.path.abspath(os.fspath(msg_path))
+    target = os.path.abspath(os.fspath(output_path))
+    partial = f"{target}.partial"
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+
+    message = None
+    try:
+        message = extract_msg.openMsg(source)
+        effective_subject = (
+            str(subject) if subject is not None
+            else _safe_msg_value(message, "subject")
+        )
+        effective_body = (
+            str(body) if body is not None
+            else _safe_msg_value(message, "body")
+        )
+        metadata = [
+            ("Тема", effective_subject),
+            ("От", _safe_msg_value(message, "sender")),
+            ("Кому", _safe_msg_value(message, "to")),
+            ("Копия", _safe_msg_value(message, "cc")),
+            ("Дата", _safe_msg_value(message, "date")),
+        ]
+        letter_docx = _build_letter_docx(metadata, effective_body)
+
+        bundle = EmailMessage(policy=SMTP)
+        safe_subject = re.sub(r"[\r\n]+", " ", effective_subject).strip()
+        bundle["Subject"] = safe_subject or "Обращение"
+        bundle["X-ASUD-Container"] = "letter-docx-with-original-attachments"
+        bundle.set_content(
+            effective_body or "Текст письма отсутствует",
+            subtype="plain",
+            charset="utf-8",
+        )
+        bundle.add_attachment(
+            letter_docx,
+            maintype="application",
+            subtype=(
+                "vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            filename="Обращение.docx",
+        )
+
+        with tempfile.TemporaryDirectory(prefix="asud_msg_parts_") as parts_dir:
+            for attachment_path in _save_msg_attachments(message, parts_dir):
+                mime_type, _encoding = mimetypes.guess_type(attachment_path)
+                if mime_type and "/" in mime_type:
+                    maintype, subtype = mime_type.split("/", 1)
+                else:
+                    maintype, subtype = "application", "octet-stream"
+                with open(attachment_path, "rb") as attachment_file:
+                    bundle.add_attachment(
+                        attachment_file.read(),
+                        maintype=maintype,
+                        subtype=subtype,
+                        filename=os.path.basename(attachment_path),
+                    )
+
+        if os.path.exists(partial):
+            os.remove(partial)
+        with open(partial, "wb") as eml_file:
+            eml_file.write(bundle.as_bytes(policy=SMTP))
+        os.replace(partial, target)
+        return target
+    except Exception:
+        try:
+            if os.path.exists(partial):
+                os.remove(partial)
+        except OSError:
+            pass
+        raise
+    finally:
+        if message is not None:
+            try:
+                message.close()
+            except Exception:
+                pass
 
 
 def _link_to_variants(link):
@@ -569,7 +918,7 @@ def _wait_confirm_and_click(driver, timeout=30):
     return False
 
 
-def attach_content(driver, file_path, max_attempts=3):
+def _attach_content_file(driver, file_path, max_attempts=3):
     """Прикрепляет файл к карточке документа через CDP intercept + send_keys.
 
     Возвращает True если файл успешно приложен, False если все retry'и
@@ -633,3 +982,59 @@ def attach_content(driver, file_path, max_attempts=3):
                                     {"enabled": False})
         except Exception:
             pass
+
+
+def attach_content(driver, file_path, max_attempts=3, *,
+                   msg_attachment_mode="original", email_subject=None,
+                   email_body=None):
+    """Прикрепляет файл; для MSG собирает временный EML или legacy-ZIP.
+
+    ``eml`` создаёт один неархивный EML: внутри ``Обращение.docx`` и исходные
+    вложения. Старое значение ``zip`` автоматически мигрирует на ``eml``, чтобы
+    уже существующие settings.json перестали отправлять проблемные ZIP.
+    ``zip-legacy`` оставлен только для ручной диагностики.
+    """
+    mode = str(msg_attachment_mode or "original").strip().casefold()
+    if mode == "zip":
+        log.warning(
+            "Режим zip отключён: АСУД зависает при скачивании архивов. "
+            "Автоматически использую безопасный EML-контейнер."
+        )
+        mode = "eml"
+    if mode not in {"original", "eml", "zip-legacy"}:
+        log.warning(
+            f"Неизвестный msg_attachment_mode={msg_attachment_mode!r}; "
+            "прикрепляю исходный файл"
+        )
+        mode = "original"
+
+    source = os.path.abspath(os.fspath(file_path))
+    if mode == "original" or not source.lower().endswith(".msg"):
+        return _attach_content_file(driver, source, max_attempts=max_attempts)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="asud_msg_bundle_") as temp_dir:
+            suffix = ".zip" if mode == "zip-legacy" else ".eml"
+            bundle_path = os.path.join(
+                temp_dir, f"{_safe_archive_stem(source)}{suffix}"
+            )
+            builder = build_msg_zip if mode == "zip-legacy" else build_msg_eml
+            builder(
+                source,
+                bundle_path,
+                subject=email_subject,
+                body=email_body,
+            )
+            log.info(
+                f"MSG преобразован: {os.path.basename(source)} → "
+                f"{os.path.basename(bundle_path)}"
+            )
+            return _attach_content_file(
+                driver, bundle_path, max_attempts=max_attempts
+            )
+    except Exception as exc:
+        log.exception(
+            f"Не удалось собрать вложение из {os.path.basename(source)}: {exc}. "
+            "Исходный MSG сохранён, вложение не отправлено."
+        )
+        return False

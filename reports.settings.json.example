@@ -1,0 +1,12 @@
+{
+  "asud_url": "https://asud.interrao.ru/asudik/",
+  "asud_load_timeout_sec": 120,
+  "reply_reports": {
+    "folder": "",
+    "switch_to_user": "",
+    "report_text": "Ответ прикреплен.",
+    "poll_interval_sec": 300,
+    "upload_timeout_sec": 90,
+    "file_stable_seconds": 5
+  }
+}

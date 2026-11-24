@@ -27,7 +27,7 @@ def status_colored(status):
     label = f"{status:<8}"
     if status == "OK":
         return green(label)
-    if status == "DRAFT":
+    if status in ("DRAFT", "EXCLUDED"):
         return yellow(label)
     if status == "FAILED" or status == "FAIL":
         return red(label)

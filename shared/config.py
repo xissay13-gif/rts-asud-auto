@@ -10,7 +10,8 @@ import sys
 import json
 import logging
 
-from shared.zhkh_routing import DEFAULT_ZHKH_ADDRESSEE_ROUTES
+from shared.zhkh_routing import DEFAULT_ZHKH_EXCLUDED_TOPICS
+from shared.feedback_parser import DEFAULT_FEEDBACK_ADDRESSEE_ROUTES
 
 log = logging.getLogger("asud.config")
 
@@ -22,10 +23,12 @@ DEFAULTS = {
     "addressees": [
         "Басманов Александр Владимирович",
     ],
-    # Точечная маршрутизация ГИС ЖКХ по ПОЛНОМУ названию темы. Цифровые
-    # ключи — номера из бизнес-таблицы; текущий MSG хранит только название.
-    # Совпавшее правило полностью заменяет общий список addressees.
-    "zhkh_addressee_routes": DEFAULT_ZHKH_ADDRESSEE_ROUTES,
+    # Точечные маршруты писем feedback по полю «Тема вопроса». Служебный код
+    # категории в квадратных скобках при сравнении игнорируется.
+    "feedback_addressee_routes": DEFAULT_FEEDBACK_ADDRESSEE_ROUTES,
+    # Эти темы ГИС ЖКХ вообще не регистрируются в АСУД. Совпадение идёт по
+    # полному названию: текущий MSG не содержит цифровой код темы.
+    "zhkh_excluded_topics": DEFAULT_ZHKH_EXCLUDED_TOPICS,
     "unknown_correspondent": "Неизвестный Неизвестный Неизвестный",
     "delivery_method": "Электронная почта",
     "sheet_name": "Лист2",
@@ -37,6 +40,14 @@ DEFAULTS = {
     # файлов, и юзер всё равно туда не лазит. Можно явно поставить False
     # глобально или в конкретном пресете если нужен бэкап.
     "delete_after_done": True,
+    # Как прикреплять Outlook-письма к карточке АСУД:
+    #   "eml"      — безопасный неархивный контейнер: Обращение.docx +
+    #                все исходные вложения;
+    #   "zip"      — старое значение автоматически заменяется на eml,
+    #                потому что веб-интерфейс АСУД зависает на ZIP;
+    #   "original" — исходный .msg как раньше.
+    # Временный EML всегда удаляется после загрузки.
+    "msg_attachment_mode": "eml",
     # Таймаут загрузки страниц ASUD (page_load + urllib3 client). 300с = 5 минут.
     # Поднят с дефолтных 120с т.к. ASUD иногда долго инициализируется.
     "asud_load_timeout_sec": 300,
@@ -179,6 +190,18 @@ def setup_file_logger(mode_name="asud"):
             if not isinstance(h, logging.FileHandler):
                 h.setLevel(logging.INFO)
         root.addHandler(fh)
+
+        # Do not persist the raw WebDriver HTTP protocol.  At root DEBUG level
+        # Selenium/urllib3 otherwise write hundreds of megabytes per day while
+        # the useful ``asud.*`` diagnostics are only a small fraction of the
+        # file. Warnings and errors from the transport are still retained.
+        for noisy_logger in (
+            "selenium",
+            "selenium.webdriver.remote.remote_connection",
+            "urllib3",
+            "urllib3.connectionpool",
+        ):
+            logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
         # Шумные под-логгеры: НЕ propagate в root (значит не попадают в консоль),
         # но получают свой file-handler чтобы по-прежнему писаться в txt.

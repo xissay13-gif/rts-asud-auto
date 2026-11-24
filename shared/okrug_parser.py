@@ -32,7 +32,8 @@ _PREFIX_RE = re.compile(
     r'^(?:г\s*омск\s*,?\s*)?'
     r'(?:улица|ул\.?|проспект|пр[-]?т\.?|пр[-]?кт\.?|пр\.?|переулок|пер\.?|'
     r'бульвар|б[-]?р\.?|площадь|пл\.?|шоссе|ш\.?|набережная|наб\.?|'
-    r'линия|тупик|проезд|пр[-]?д\.?|микрорайон|мкр\.?)\s*',
+    r'линия|тупик|проезд|пр[-]?д\.?|микрорайон|мкр\.?|'
+    r'пос[её]лок|пос\.?|пгт\.?|п\.?|городок|г[-\s]*к\.?)\s*',
     re.IGNORECASE)
 
 _HOUSE_RE = re.compile(r'(\d+[а-я]?)', re.IGNORECASE)
@@ -44,8 +45,10 @@ def _norm_text(s):
     s = str(s).lower().replace('ё', 'е')
     s = re.sub(r'[«»"\'`]', '', s)
     s = re.sub(r'[.,;:()\\/]+', ' ', s)
-    # "3-я молодежная" / "3я молодежная" → "3 молодежная"
-    s = re.sub(r'(\d+)[\s-]*я(?=\s)', r'\1', s)
+    # "3-я молодежная" / "3-й разъезд" → "3 молодежная" / "3 разъезд".
+    s = re.sub(r'(\d+)[\s-]*(?:я|й|ая|ой|ый)(?=\s)', r'\1', s)
+    # Частая склейка в письмах: "13линия" → "13 линия".
+    s = re.sub(r'(\d+)(?=(?:линия|разъезд)\b)', r'\1 ', s)
     return re.sub(r'\s+', ' ', s).strip()
 
 
@@ -108,21 +111,21 @@ def _build_index(base_dir_fn=None):
             for row in reader:
                 if not row or len(row) <= max(cols['street'], cols['house'], cols['okrug']):
                     continue
-                s = row[cols['street']].strip().lower()
-                h = row[cols['house']].strip().lower()
+                s = _norm_street_name(row[cols['street']])
+                h = _norm_house(row[cols['house']])
                 o = row[cols['okrug']].strip()
                 if s and h and o:
-                    # Базовый ключ
-                    idx[s].add((h, o))
-                    # Алиасы для номерных улиц:
-                    # 'молодежная 3-я' → также 'молодежная 3', '3-я молодежная',
-                    # '3 молодежная'
-                    m = re.match(r'^(.+?)\s+(\d+)[\s-]*я$', s)
-                    if m:
-                        base, num = m.group(1).strip(), m.group(2)
-                        idx[f"{base} {num}"].add((h, o))
-                        idx[f"{num}-я {base}"].add((h, o))
-                        idx[f"{num} {base}"].add((h, o))
+                    aliases = {s}
+                    # Номерные улицы встречаются в обоих порядках:
+                    # "Молодёжная 3-я" ↔ "3-я Молодёжная".
+                    trailing = re.match(r'^(.+?)\s+(\d+)$', s)
+                    leading = re.match(r'^(\d+)\s+(.+)$', s)
+                    if trailing:
+                        aliases.add(f"{trailing.group(2)} {trailing.group(1).strip()}")
+                    if leading:
+                        aliases.add(f"{leading.group(2).strip()} {leading.group(1)}")
+                    for alias in aliases:
+                        idx[alias].add((h, o))
         _index = idx
         _streets_sorted = sorted(idx.keys(), key=lambda x: -len(x))
         log.info(f"Street index: {len(idx)} улиц")
@@ -133,8 +136,10 @@ def _build_index(base_dir_fn=None):
     return _index, _streets_sorted
 
 
-def _find_street_house(text, idx, sorted_streets):
+def _street_candidates(text, idx, sorted_streets):
+    """Все известные улицы в тексте с ближайшим номером дома, если он есть."""
     norm = _norm_text(text)
+    candidates = []
     for street in sorted_streets:
         if len(street) < 3:
             continue
@@ -148,21 +153,85 @@ def _find_street_house(text, idx, sorted_streets):
             right_ok = end == len(norm) or not norm[end].isalnum()
             if left_ok and right_ok:
                 tail = norm[end:end + 50]
+                # «Омская обл.» — административный регион, а не улица Омская.
+                if re.match(r'\s*(?:обл(?:асть|асти)?|район|р-н)\b', tail):
+                    pos = i + 1
+                    continue
+                # «Омская энергосбытовая компания» — тоже не адрес. Для улицы
+                # Омской нужен явный префикс «ул.» либо номер сразу после неё.
+                if street == 'омская':
+                    prefix = norm[max(0, i - 12):i]
+                    explicit_street = bool(re.search(r'(?:ул|улица)\s*$', prefix))
+                    direct_house = bool(re.match(r'\s*(?:д(?:ом)?\s*)?\d', tail))
+                    if not explicit_street and not direct_house:
+                        pos = i + 1
+                        continue
                 m = re.search(r'\b(\d+[а-я]?)', tail)
-                if m:
-                    return (street, m.group(1))
+                # В свободном тексте встречаются слова «мира», «труда» и т.п.
+                # Считаем их адресом только при явном типе улицы либо когда
+                # номер дома расположен рядом, а не через полпредложения.
+                prefix = norm[max(0, i - 24):i]
+                explicit_street = bool(re.search(
+                    r'(?:улица|ул|проспект|пр т|пр кт|переулок|пер|бульвар|'
+                    r'б р|площадь|пл|шоссе|наб|линия|тупик|проезд|микрорайон|'
+                    r'мкр|поселок|пос|пгт|городок|г к)\s*$', prefix))
+                house_is_near = bool(m and m.start() <= 18)
+                if not explicit_street and not house_is_near:
+                    pos = i + 1
+                    continue
+                candidates.append((i, street, m.group(1) if m else None))
             pos = i + 1
-    return (None, None)
+    candidates.sort(key=lambda item: (item[0], -len(item[1])))
+    return candidates
 
 
-def okrug_from_textbody(textbody, base_dir_fn=None):
-    """Извлекает округ ('КАО'/'САО'/'ЦАО'/'ОАО'/'ЛАО') из TextBody. Возвращает None если не нашли."""
-    if not textbody:
-        return None
+def _find_street_house(text, idx, sorted_streets):
+    """Обратная совместимость: первый найденный кандидат улица/дом."""
+    candidates = _street_candidates(text, idx, sorted_streets)
+    return candidates[0][1:] if candidates else (None, None)
+
+
+def _match_fragment(fragment, idx, sorted_streets):
+    """Возвращает точное и безопасное резервное совпадение для фрагмента."""
+    exact = []
+    fallback = []
+    for _, street, house in _street_candidates(fragment, idx, sorted_streets):
+        street_rows = idx.get(street, ())
+        districts = {district for _, district in street_rows}
+        if house:
+            house_num = re.match(r'\d+', house)
+            house_num = house_num.group(0) if house_num else house
+            for known_house, district in street_rows:
+                known_num = re.match(r'\d+', known_house)
+                known_num = known_num.group(0) if known_num else known_house
+                if known_house == house or known_num == house_num:
+                    exact.append((district, street, house))
+        # Резерв разрешён только когда вся улица в БД относится к одному округу.
+        if len(districts) == 1:
+            fallback.append((next(iter(districts)), street, house))
+    exact_districts = {item[0] for item in exact}
+    if len(exact_districts) == 1:
+        return exact[0], None
+    fallback_districts = {item[0] for item in fallback}
+    if not exact and len(fallback_districts) == 1:
+        return None, fallback[0]
+    return None, None
+
+
+def okrug_from_textbody(textbody, base_dir_fn=None, subject=None,
+                        return_reason=False):
+    """Извлекает округ из тела/темы письма.
+
+    ``return_reason=True`` возвращает ``(округ, причина)`` для диагностики.
+    Резерв по одной улице применяется только если все её дома в адресной БД
+    находятся в одном округе.
+    """
+    if not textbody and not subject:
+        return (None, "нет текста") if return_reason else None
     idx, sorted_streets = _build_index(base_dir_fn)
     if not idx:
-        return None
-    text = str(textbody)
+        return (None, "адресная база недоступна") if return_reason else None
+    text = str(textbody or '')
     fragments = []
     m = re.search(r'суть\s+обращени[яе]\s*:?\s*([\s\S]+?)(?:\n\s*\n|$)',
                   text, re.IGNORECASE)
@@ -172,20 +241,31 @@ def okrug_from_textbody(textbody, base_dir_fn=None):
                   text, re.IGNORECASE)
     if m:
         fragments.append(('почт', m.group(1)))
-    fragments.append(('весь', text))
+    if subject:
+        fragments.append(('тема', str(subject)))
+    if text:
+        fragments.append(('тело', text))
 
+    fallback_hits = []
     for name, frag in fragments:
-        street, house = _find_street_house(frag, idx, sorted_streets)
-        if street and house:
-            # Нормализация дома для сравнения: '15г' → '15', '6в' → '6'.
-            # Литерные суффиксы (а/б/в/г) обозначают разные строения одного
-            # дома — обычно в одном округе, можно игнорировать.
-            house_digits = re.match(r'\d+', house)
-            house_num = house_digits.group(0) if house_digits else house
-            for h, o in idx[street]:
-                # В БД тоже могут быть дома с буквами — нормализуем обе стороны
-                h_digits = re.match(r'\d+', h)
-                h_num = h_digits.group(0) if h_digits else h
-                if h == house or h_num == house_num:
-                    return o
-    return None
+        exact, fallback = _match_fragment(frag, idx, sorted_streets)
+        if exact:
+            district, street, house = exact
+            reason = f"точно, {name}: {street} {house}"
+            log.info(f"Округ {district} ({reason})")
+            return (district, reason) if return_reason else district
+        if fallback:
+            fallback_hits.append((name, fallback))
+
+    fallback_districts = {item[1][0] for item in fallback_hits}
+    if len(fallback_districts) == 1:
+        name, (district, street, house) = fallback_hits[0]
+        suffix = f" {house}" if house else ""
+        reason = f"по однозначной улице, {name}: {street}{suffix}"
+        log.info(f"Округ {district} ({reason})")
+        return (district, reason) if return_reason else district
+
+    reason = ("несколько возможных округов" if fallback_hits
+              else "адрес не найден в базе")
+    log.info(f"Округ не определён: {reason}")
+    return (None, reason) if return_reason else None

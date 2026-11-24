@@ -24,20 +24,24 @@ import os
 import re
 import sys
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
+import openpyxl
 from selenium import webdriver
 from selenium.webdriver.edge.service import Service as EdgeService
 
 from flows import mix as mix_flow
 from shared import config as cfg
 from shared.ui import set_driver_timeout, wait_asud_loaded
+from shared.xlsx_lock import xlsx_lock
 
 
 log = logging.getLogger("asud")
 
 STATE_NAME = ".asud_sbis_state.json"
+STATE_BACKUP_NAME = ".asud_sbis_state.backup.json"
+STATE_VERSION = 2
 DOWNLOAD_MANIFEST_NAME = ".manifest.json"
 DONE_STATUSES = {"OK", "DUPLICATE"}
 # Уже зарегистрированный документ нельзя автоматически создавать повторно,
@@ -214,6 +218,14 @@ def _state_path(root):
     return Path(root) / STATE_NAME
 
 
+def _state_backup_path(root):
+    return Path(root) / STATE_BACKUP_NAME
+
+
+def _new_state():
+    return {"version": STATE_VERSION, "next_number": 1, "files": {}}
+
+
 def load_manifest_ids(root):
     """Связывает имя PDF с внутренним ID СБИС без вывода ID в имя/АСУД."""
     path = Path(root) / DOWNLOAD_MANIFEST_NAME
@@ -241,28 +253,210 @@ def load_manifest_ids(root):
     return result
 
 
-def load_state(root):
-    path = _state_path(root)
+def _normalise_registry_key(value):
+    return str(value or "").strip().replace("\\", "/").casefold()
+
+
+def load_registry(path):
+    """Читает долговечный реестр СБИС из книги резолюций.
+
+    Если существующая книга повреждена или занята так, что её нельзя
+    прочитать, регистрация останавливается: продолжать без второй защиты от
+    дублей небезопасно.
+    """
+    path = Path(path)
     if not path.exists():
-        return {"version": 1, "next_number": 1, "files": {}}
+        return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data.get("files"), dict):
-            raise ValueError("поле files отсутствует")
-        data.setdefault("version", 1)
-        data.setdefault("next_number", 1)
-        return data
+        with xlsx_lock(str(path), timeout=60):
+            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            try:
+                if "СБИС" not in wb.sheetnames:
+                    return {}
+                ws = wb["СБИС"]
+                headers = {
+                    str(cell.value or "").strip(): cell.column
+                    for cell in ws[1]
+                }
+                key_col = headers.get("Ключ")
+                if not key_col:
+                    raise ValueError("на листе СБИС отсутствует колонка Ключ")
+                status_col = headers.get("Статус")
+                asud_col = headers.get("Номер АСУД")
+                result = {}
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    key = row[key_col - 1] if len(row) >= key_col else ""
+                    normalised = _normalise_registry_key(key)
+                    if not normalised:
+                        continue
+                    result[normalised] = {
+                        "key": str(key),
+                        "status": str(
+                            row[status_col - 1]
+                            if status_col and len(row) >= status_col else ""
+                        ).strip(),
+                        "asud_id": str(
+                            row[asud_col - 1]
+                            if asud_col and len(row) >= asud_col else ""
+                        ).strip(),
+                    }
+                return result
+            finally:
+                wb.close()
     except Exception as exc:
-        log.warning(f"Не удалось прочитать {path.name}: {exc}. Начинаю новый state.")
-        return {"version": 1, "next_number": 1, "files": {}}
+        raise RuntimeError(
+            f"Защита от дублей остановила регистрацию: не удалось прочитать "
+            f"реестр {path.name}: {exc}"
+        ) from exc
+
+
+def mark_manifest_processed(root, item, status, asud_id=""):
+    """Помечает письмо обработанным, чтобы СБИС не скачал удалённый PDF снова."""
+    path = Path(root) / DOWNLOAD_MANIFEST_NAME
+    if not path.exists():
+        return True
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("корень манифеста должен быть объектом")
+        wanted_id = str(item.get("sbis_id") or "").strip().casefold()
+        wanted_file = _normalise_registry_key(item.get("display_key"))
+        matched = False
+        for manifest_key, entry in raw.items():
+            if not isinstance(entry, dict):
+                continue
+            entry_id = str(
+                entry.get("sbis_id") or str(manifest_key).split("|", 1)[0]
+            ).strip().casefold()
+            names = list(entry.get("files") or [])
+            if entry.get("archive"):
+                names.append(entry["archive"])
+            name_match = wanted_file and any(
+                _normalise_registry_key(name) == wanted_file for name in names
+            )
+            if (wanted_id and entry_id == wanted_id) or name_match:
+                entry.update({
+                    "asud_processed": True,
+                    "asud_status": status,
+                    "asud_id": asud_id or "",
+                    "asud_processed_at": datetime.now().isoformat(timespec="seconds"),
+                })
+                matched = True
+        if not matched:
+            # Ручные файлы могут не иметь записи загрузчика — это нормально.
+            return True
+        payload = json.dumps(raw, ensure_ascii=False, indent=1)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except Exception as exc:
+        log.error(f"Не удалось отметить письмо в {DOWNLOAD_MANIFEST_NAME}: {exc}")
+        return False
+
+
+def finalize_completed_file(root, output_path, item, entry):
+    """Фиксирует подтверждённый результат и только затем удаляет источник."""
+    status = str(entry.get("status") or "")
+    if status not in DONE_STATUSES:
+        return False
+    asud_id = str(entry.get("asud_id") or "")
+    if not mix_flow._append_output_row(
+            output_path, item["doc_data"], asud_id, status=status):
+        log.error(
+            f"Файл оставлен: результат не записан в реестр — "
+            f"{item['display_key']}")
+        return False
+    if not mark_manifest_processed(root, item, status, asud_id):
+        log.error(
+            f"Файл оставлен: манифест СБИС не обновлён — "
+            f"{item['display_key']}")
+        return False
+    try:
+        item["path"].unlink()
+        entry["source_deleted"] = True
+        entry["source_deleted_at"] = datetime.now().isoformat(timespec="seconds")
+        log.info(f"Обработанный файл удалён: {item['display_key']}")
+        return True
+    except FileNotFoundError:
+        entry["source_deleted"] = True
+        return True
+    except OSError as exc:
+        log.error(f"Не удалось удалить {item['display_key']}: {exc}")
+        return False
+
+
+def _read_state_file(path):
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not isinstance(data.get("files"), dict):
+        raise ValueError("поле files отсутствует")
+    try:
+        version = int(data.get("version", 1))
+    except (TypeError, ValueError):
+        version = 1
+    if version < STATE_VERSION:
+        migrated = 0
+        for entry in data["files"].values():
+            if not isinstance(entry, dict) or entry.get("status") != "FAILED":
+                continue
+            old_error = str(entry.get("last_error") or "").strip()
+            entry["status"] = "SUBMISSION_UNKNOWN"
+            entry["last_error"] = (
+                "Миграция старого state: версия 1 не могла отличить отказ "
+                "от уже принятой регистрации; автоматический повтор запрещён."
+                + (f" Исходная ошибка: {old_error}" if old_error else "")
+            )[:1000]
+            migrated += 1
+        data["version"] = STATE_VERSION
+        if migrated:
+            log.warning(
+                f"State v{version}: {migrated} старых FAILED переведены в "
+                "SUBMISSION_UNKNOWN для защиты от повторной регистрации")
+    else:
+        data["version"] = version
+    data.setdefault("next_number", 1)
+    return data
+
+
+def load_state(root):
+    """Читает state с fail-closed восстановлением из резервной копии.
+
+    Потеря state означает риск повторной регистрации. Поэтому повреждённый
+    основной и резервный файлы никогда не заменяются пустым состоянием.
+    """
+    path = _state_path(root)
+    backup = _state_backup_path(root)
+    if not path.exists() and not backup.exists():
+        return _new_state()
+
+    errors = []
+    for candidate in (path, backup):
+        if not candidate.exists():
+            continue
+        try:
+            data = _read_state_file(candidate)
+            if candidate == backup:
+                log.warning(
+                    f"Основной {path.name} недоступен; состояние восстановлено "
+                    f"из {backup.name}")
+            return data
+        except Exception as exc:
+            errors.append(f"{candidate.name}: {exc}")
+
+    detail = "; ".join(errors) or "файлы состояния отсутствуют"
+    raise RuntimeError(
+        "Защита от дублей остановила регистрацию: не удалось прочитать "
+        f"state ({detail}). Восстановите {path.name} или {backup.name}; "
+        "не запускайте регистрацию с пустым state."
+    )
 
 
 def save_state(root, state):
-    path = _state_path(root)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
-    os.replace(tmp, path)
+    payload = json.dumps(state, ensure_ascii=False, indent=2)
+    for path in (_state_path(root), _state_backup_path(root)):
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
 
 
 def _file_signature(path):
@@ -273,7 +467,7 @@ def _file_signature(path):
 def prepare_items(root, files, state, surname_override="",
                   include_extension=False, doc_type_index=8,
                   person_doc_type_index=8, legal_doc_type_index=5,
-                  manifest_ids=None):
+                  manifest_ids=None, registry_records=None):
     """Назначает стабильные номера и готовит doc_data для mix-flow."""
     root = Path(root).resolve()
     records = state.setdefault("files", {})
@@ -285,6 +479,7 @@ def prepare_items(root, files, state, surname_override="",
     items = []
     seen_state_keys = set()
     manifest_ids = manifest_ids or {}
+    registry_records = registry_records or {}
     for path in files:
         path = Path(path).resolve()
         display_key = path.relative_to(root).as_posix()
@@ -312,16 +507,18 @@ def prepare_items(root, files, state, surname_override="",
         content = content_from_file(path, include_extension)
         signature = _file_signature(path)
         saved_status = entry.get("status")
-        # Ручные/неопределённые исходы никогда не запускаем автоматически
-        # снова даже если файл был перезаписан: первый клик мог создать
-        # документ. Повтор разрешается только явным сбросом state.
-        already_done = (
-            saved_status in MANUAL_STATUSES
-            or (
-                saved_status in DONE_STATUSES
-                and (bool(sbis_id) or entry.get("signature") == signature)
-            )
-        )
+        registry_record = registry_records.get(
+            _normalise_registry_key(state_key))
+        if registry_record and registry_record.get("status") in TERMINAL_STATUSES:
+            saved_status = registry_record["status"]
+            entry["status"] = saved_status
+            entry["asud_id"] = registry_record.get("asud_id", "")
+            entry["last_error"] = ""
+        # Любой терминальный исход никогда не запускаем автоматически снова.
+        # Повторно сохранённый PDF меняет mtime/signature, но это не превращает
+        # уже зарегистрированный документ в новый. Осознанный повтор возможен
+        # только через явный --reset-state.
+        already_done = saved_status in TERMINAL_STATUSES
         legacy_type_index = int(doc_type_index)
         if correspondent_type == "person":
             item_type_index = int(person_doc_type_index)
@@ -361,6 +558,8 @@ def prepare_items(root, files, state, surname_override="",
                 "link": None,
                 "файл": str(path),
                 "sbis_id": sbis_id,
+                "sbis_key": state_key,
+                "sbis_source_path": display_key,
                 "номер_обращения": f"б/н ({entry['number']})",
                 "require_attachment": True,
             },
@@ -415,10 +614,15 @@ def main():
         return
 
     if os.environ.get("ASUD_SBIS_RESET_STATE") == "1":
-        state = {"version": 1, "next_number": 1, "files": {}}
+        state = _new_state()
         log.warning("State нумерации сброшен по флагу --reset-state")
     else:
-        state = load_state(root)
+        try:
+            state = load_state(root)
+        except RuntimeError as exc:
+            log.error(str(exc))
+            cfg.keep_system_awake(False)
+            return
 
     surname_override = (os.environ.get("ASUD_SBIS_SURNAME", "").strip()
                         or str(options.get("surname_override") or "").strip())
@@ -426,6 +630,15 @@ def main():
     files = scan_files(root, extensions)
     if not files:
         log.error(f"В {root} не найдено поддерживаемых файлов")
+        cfg.keep_system_awake(False)
+        return
+
+    output_path = _output_path(root)
+    mix_flow._ensure_output_xlsx(output_path)
+    try:
+        registry_records = load_registry(output_path)
+    except RuntimeError as exc:
+        log.error(str(exc))
         cfg.keep_system_awake(False)
         return
 
@@ -449,10 +662,24 @@ def main():
         person_doc_type_index=person_doc_type_index,
         legal_doc_type_index=legal_doc_type_index,
         manifest_ids=load_manifest_ids(root),
+        registry_records=registry_records,
     )
     save_state(root, state)  # фиксируем номера до первого запуска браузера
 
-    invalid = [item for item in items if not item["correspondent"]]
+    # Доводим до конца ранее подтверждённые записи. Это также переносит старый
+    # state в новый реестр и удаляет файлы, оставшиеся после прошлой версии.
+    cleanup_errors = 0
+    for item in items:
+        entry = state["files"][item["key"]]
+        if item["already_done"] and entry.get("status") in DONE_STATUSES:
+            if not finalize_completed_file(root, output_path, item, entry):
+                cleanup_errors += 1
+    save_state(root, state)
+
+    invalid = [
+        item for item in items
+        if not item["already_done"] and not item["correspondent"]
+    ]
     if invalid:
         log.error("Не удалось определить корреспондента для файлов:")
         for item in invalid[:20]:
@@ -513,8 +740,6 @@ def main():
     set_driver_timeout(driver, settings.get(
         "asud_load_timeout_sec", cfg.DEFAULTS["asud_load_timeout_sec"]))
 
-    output_path = _output_path(root)
-    mix_flow._ensure_output_xlsx(output_path)
     done_count = duplicate_count = error_count = 0
 
     try:
@@ -581,12 +806,13 @@ def main():
                     "last_error": "",
                 })
                 save_state(root, state)
-                mix_flow._append_output_row(
-                    output_path, item["doc_data"], asud_id, status=status)
+                if not finalize_completed_file(root, output_path, item, entry):
+                    cleanup_errors += 1
+                save_state(root, state)
             except Exception as exc:
                 error_count += 1
                 flow_status = mix_flow._last_result.get("status", "FAILED")
-                if flow_status in MANUAL_STATUSES:
+                if flow_status in TERMINAL_STATUSES:
                     # Даже если recovery/закрытие карточки упало уже после
                     # terminal-исхода, сохраняем полный ключ и signature. Иначе
                     # файл без sbis_id снова попадёт в pending после рестарта.
@@ -605,8 +831,22 @@ def main():
                 else:
                     entry["status"] = "FAILED"
                     entry["last_error"] = str(exc)[:500]
-                save_state(root, state)
-                if flow_status in MANUAL_STATUSES:
+                try:
+                    save_state(root, state)
+                except Exception as state_exc:
+                    log.error(f"Не удалось сохранить state: {state_exc}")
+                if flow_status in DONE_STATUSES:
+                    # Например, АСУД уже показал «Дубликат», а закрытие карточки
+                    # упало. Подтверждённый исход всё равно фиксируем и удаляем,
+                    # иначе следующий запуск снова отправит тот же документ.
+                    if not finalize_completed_file(
+                            root, output_path, item, entry):
+                        cleanup_errors += 1
+                    try:
+                        save_state(root, state)
+                    except Exception as state_exc:
+                        log.error(f"Не удалось сохранить state: {state_exc}")
+                elif flow_status in MANUAL_STATUSES:
                     mix_flow._append_output_row(
                         output_path, item["doc_data"], asud_id,
                         status=flow_status,
@@ -622,6 +862,7 @@ def main():
         log.info("=" * 55)
         log.info(f"ГОТОВО: зарегистрировано {done_count}, "
                  f"дубликатов {duplicate_count}, ошибок {error_count}, "
+                 f"ошибок очистки {cleanup_errors}, "
                  f"ранее обработано {skipped}; время {elapsed}")
         log.info(f"State: {_state_path(root)}")
     finally:

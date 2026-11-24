@@ -16,6 +16,7 @@ import hashlib
 import math
 import os
 import re
+import sqlite3
 import sys
 import time
 import logging
@@ -35,10 +36,10 @@ from selenium.webdriver.support import expected_conditions as EC
 
 from shared import config as cfg
 from shared.ui import (click, wait_and_click, find_input_near_label,
-                wait_asud_loaded, wait_modal_closed, close_open_modals,
-                js_set_value, js_type_combobox, find_dropdown_options,
-                wait_pointer_events_auto, is_duplicate_warning,
-                set_driver_timeout)
+                 wait_asud_loaded, wait_modal_closed, close_open_modals,
+                 js_set_value, js_type_combobox, find_dropdown_options,
+                 wait_pointer_events_auto, is_duplicate_warning,
+                 set_driver_timeout, dismiss_system_notifications)
 from shared.correspondent import fill_correspondent_field, match_correspondent
 from shared.addressee import add_addressee as _add_addressee_verified
 from shared.attachments import get_dummy_msg, attach_content
@@ -59,6 +60,8 @@ start_time = time.monotonic()
 # ================= REGISTRATION STATE =================
 
 STATE_SUFFIX = ".asud_auto_create_state.json"
+GLOBAL_HISTORY_FILENAME = ".asud_auto_create_history.sqlite3"
+GLOBAL_CLAIMED_STATUS = "CLAIMED"
 TERMINAL_REGISTRATION_STATUSES = frozenset({
     "OK",
     "DUPLICATE",
@@ -194,6 +197,343 @@ def _source_key_for_raw_row(row, identical_counts):
     return f"row-sha256:{digest}:{ordinal}"
 
 
+def _normalise_dedupe_text(value):
+    """Стабильный текст для сравнения документов между разными Excel."""
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.replace("\u00a0", " ").casefold()
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _document_fingerprint(doc_data):
+    """Отпечаток данных, которые реально определяют документ в АСУД.
+
+    В отличие от ``_source_key`` он не зависит от имени Excel, номера строки,
+    технической колонки ``№`` и маршрутизации в округ. Поэтому копия/переименование
+    уже обработанного реестра не превращает старые обращения в новые.
+    """
+    payload = {
+        "content": _normalise_dedupe_text(doc_data.get("содержание")),
+        "correspondent": _normalise_dedupe_text(doc_data.get("корреспондент")),
+        "document_type": str(doc_data.get("тема_индекс") or "default"),
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"document-sha256:{digest}"
+
+
+def _global_history_path(excel_path):
+    """Общая история для всех Excel в рабочей папке.
+
+    Путь можно явно закрепить через ``ASUD_AUTO_CREATE_HISTORY_DB``. По
+    умолчанию БД лежит рядом с исходными реестрами и переживает их
+    переименование/замену.
+    """
+    override = os.environ.get("ASUD_AUTO_CREATE_HISTORY_DB", "").strip()
+    if override:
+        return Path(override).resolve()
+    return Path(excel_path).resolve().parent / GLOBAL_HISTORY_FILENAME
+
+
+def _connect_global_history(excel_path):
+    path = _global_history_path(excel_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(str(path), timeout=30)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 30000")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS registrations (
+            fingerprint TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            asud_id TEXT NOT NULL DEFAULT '',
+            source_path TEXT NOT NULL DEFAULT '',
+            source_row INTEGER,
+            correspondent TEXT NOT NULL DEFAULT '',
+            content_preview TEXT NOT NULL DEFAULT '',
+            owner_pid INTEGER,
+            error TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    return connection
+
+
+def _global_row_to_dict(row):
+    return dict(row) if row is not None else None
+
+
+def _global_document_state(excel_path, doc_data):
+    fingerprint = doc_data.get("_dedupe_key") or _document_fingerprint(doc_data)
+    connection = _connect_global_history(excel_path)
+    try:
+        row = connection.execute(
+            "SELECT * FROM registrations WHERE fingerprint = ?",
+            (fingerprint,),
+        ).fetchone()
+    finally:
+        connection.close()
+    return _global_row_to_dict(row)
+
+
+def _pid_is_running(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _claim_global_document(excel_path, doc_data):
+    """Атомарно резервирует документ до открытия карточки.
+
+    Возвращает ``(True, previous)`` если строку можно обрабатывать. Терминальная
+    запись, неопределённая отправка или живая параллельная обработка возвращают
+    ``(False, entry)``. ``CLAIMED`` умершего процесса безопасно подхватывается:
+    клик регистрации выполняется только после перехода в SUBMISSION_PENDING.
+    """
+    fingerprint = doc_data.get("_dedupe_key") or _document_fingerprint(doc_data)
+    now = datetime.now().isoformat(timespec="seconds")
+    connection = _connect_global_history(excel_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT * FROM registrations WHERE fingerprint = ?",
+            (fingerprint,),
+        ).fetchone()
+        previous = _global_row_to_dict(row)
+        if previous:
+            status = previous.get("status")
+            owner_alive = (
+                status == GLOBAL_CLAIMED_STATUS
+                and _pid_is_running(previous.get("owner_pid"))
+            )
+            if status != "RETRYABLE" and (
+                    status != GLOBAL_CLAIMED_STATUS or owner_alive):
+                connection.commit()
+                return False, previous
+
+        values = (
+            GLOBAL_CLAIMED_STATUS,
+            str(Path(excel_path).resolve()),
+            doc_data.get("_source_row"),
+            str(doc_data.get("корреспондент") or "")[:250],
+            str(doc_data.get("содержание") or "")[:500],
+            os.getpid(),
+            now,
+            fingerprint,
+        )
+        connection.execute(
+            """
+            INSERT INTO registrations (
+                status, source_path, source_row, correspondent,
+                content_preview, owner_pid, updated_at, fingerprint
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fingerprint) DO UPDATE SET
+                status=excluded.status,
+                source_path=excluded.source_path,
+                source_row=excluded.source_row,
+                correspondent=excluded.correspondent,
+                content_preview=excluded.content_preview,
+                owner_pid=excluded.owner_pid,
+                error='',
+                updated_at=excluded.updated_at
+            """,
+            values,
+        )
+        connection.commit()
+        return True, previous
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _record_global_document(excel_path, doc_data, status, *, asud_id=None,
+                            error="", only_if_missing=False):
+    allowed = REGISTRATION_STATUSES | {GLOBAL_CLAIMED_STATUS}
+    if status not in allowed:
+        raise ValueError(f"Неизвестный global registration status: {status}")
+    fingerprint = doc_data.get("_dedupe_key") or _document_fingerprint(doc_data)
+    now = datetime.now().isoformat(timespec="seconds")
+    owner_pid = os.getpid() if status in {
+        GLOBAL_CLAIMED_STATUS, "SUBMISSION_PENDING"
+    } else None
+    connection = _connect_global_history(excel_path)
+    try:
+        if only_if_missing:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO registrations (
+                    fingerprint, status, asud_id, source_path, source_row,
+                    correspondent, content_preview, owner_pid, error, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    fingerprint, status, str(asud_id or ""),
+                    str(Path(excel_path).resolve()), doc_data.get("_source_row"),
+                    str(doc_data.get("корреспондент") or "")[:250],
+                    str(doc_data.get("содержание") or "")[:500], owner_pid,
+                    str(error or "")[:500], now,
+                ),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO registrations (
+                    fingerprint, status, asud_id, source_path, source_row,
+                    correspondent, content_preview, owner_pid, error, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fingerprint) DO UPDATE SET
+                    status=excluded.status,
+                    asud_id=excluded.asud_id,
+                    source_path=excluded.source_path,
+                    source_row=excluded.source_row,
+                    correspondent=excluded.correspondent,
+                    content_preview=excluded.content_preview,
+                    owner_pid=excluded.owner_pid,
+                    error=excluded.error,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    fingerprint, status, str(asud_id or ""),
+                    str(Path(excel_path).resolve()), doc_data.get("_source_row"),
+                    str(doc_data.get("корреспондент") or "")[:250],
+                    str(doc_data.get("содержание") or "")[:500], owner_pid,
+                    str(error or "")[:500], now,
+                ),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _seed_global_history_from_sidecar(excel_path, state, docs):
+    """Переносит уже известные результаты старого sidecar в общую историю."""
+    seeded = 0
+    for doc in docs:
+        entry = _document_state(state, doc) or {}
+        status = entry.get("status")
+        if status not in TERMINAL_REGISTRATION_STATUSES:
+            continue
+        before = _global_document_state(excel_path, doc)
+        _record_global_document(
+            excel_path,
+            doc,
+            status,
+            asud_id=entry.get("asud_id"),
+            error=entry.get("error", ""),
+            only_if_missing=True,
+        )
+        if before is None:
+            seeded += 1
+    return seeded
+
+
+def _handle_document_exception(excel_path, state, doc_data, error):
+    """Безопасно фиксирует исключение, не понижая уже известный результат.
+
+    Общая SQLite-история записывается раньше старого JSON-sidecar. Если
+    регистрация уже подтверждена, а сохранение sidecar упало, терминальный
+    результат обязан остаться терминальным — иначе следующий запуск создаст
+    повтор. Аналогично сохраняем доказанный ``RETRYABLE`` после результата,
+    который гарантирует, что клик не отправлялся.
+    """
+    current = _document_state(state, doc_data) or {}
+    try:
+        global_current = _global_document_state(excel_path, doc_data) or {}
+    except Exception as global_read_exc:
+        global_current = {}
+        log.error(f"Не удалось прочитать общую историю: {global_read_exc}")
+
+    global_status = global_current.get("status")
+    if (
+        global_status in TERMINAL_REGISTRATION_STATUSES
+        and global_status != "SUBMISSION_PENDING"
+    ):
+        try:
+            _record_document_state(
+                excel_path,
+                state,
+                doc_data,
+                global_status,
+                asud_id=global_current.get("asud_id"),
+                error=global_current.get("error", ""),
+            )
+        except Exception as state_exc:
+            log.error(
+                "Терминальный результат сохранён в общей истории, но sidecar "
+                f"не обновлён: {state_exc}"
+            )
+        return global_status
+
+    if global_status == "RETRYABLE":
+        try:
+            _record_document_state(
+                excel_path,
+                state,
+                doc_data,
+                "RETRYABLE",
+                error=error,
+            )
+        except Exception as state_exc:
+            log.error(
+                "Повтор разрешён общей историей, но sidecar не обновлён: "
+                f"{state_exc}"
+            )
+        return "RETRYABLE"
+
+    submission_may_have_started = (
+        current.get("status") == "SUBMISSION_PENDING"
+        or global_status == "SUBMISSION_PENDING"
+    )
+    if submission_may_have_started:
+        try:
+            _record_global_document(
+                excel_path,
+                doc_data,
+                "SUBMISSION_UNKNOWN",
+                asud_id=(
+                    current.get("asud_id")
+                    or global_current.get("asud_id")
+                ),
+                error=error,
+            )
+            _record_document_state(
+                excel_path,
+                state,
+                doc_data,
+                "SUBMISSION_UNKNOWN",
+                asud_id=current.get("asud_id"),
+                error=error,
+            )
+        except Exception as state_exc:
+            # На диске остаётся предыдущий атомарно записанный
+            # SUBMISSION_PENDING, поэтому перезапуск всё равно safe.
+            log.error(f"Не удалось обновить sidecar: {state_exc}")
+        return "SUBMISSION_UNKNOWN"
+
+    try:
+        _record_global_document(
+            excel_path,
+            doc_data,
+            "RETRYABLE",
+            error=error,
+        )
+    except Exception as global_state_exc:
+        log.error(
+            "Не удалось освободить строку в общей истории: "
+            f"{global_state_exc}"
+        )
+    return "RETRYABLE"
+
+
 # ================= EXCEL =================
 
 def load_excel(file_path):
@@ -262,6 +602,7 @@ def load_excel(file_path):
                 item["тема_индекс"] = int(row[idx_type])
             except Exception:
                 pass
+        item["_dedupe_key"] = _document_fingerprint(item)
         rows.append(item)
     wb.close()
     log.info(f"Загружено: {len(rows)} документов")
@@ -742,6 +1083,11 @@ def create_one_document(driver, doc_data, index, total, *, before_register=None)
     log.info(f"Содержание: {doc_data['содержание'][:60]}...")
     log.info(f"Корреспондент: {doc_data['корреспондент']}")
 
+    if not dismiss_system_notifications(driver):
+        raise RuntimeError(
+            "Системное уведомление АСУД перекрывает главную страницу"
+        )
+
     el = WebDriverWait(driver, cfg.DEFAULTS["timeout"]).until(
         EC.presence_of_element_located((By.ID, "mainscreen-create-button")))
     click(driver, el, "Создать документ")
@@ -891,15 +1237,38 @@ def _output_xlsx_path(excel_path):
     return os.path.join(registered_dir, name + "_резолюции.xlsx")
 
 
+OUTPUT_FINGERPRINT_HEADER = "_ASUD fingerprint"
+OUTPUT_SOURCE_ROW_HEADER = "_ASUD source row"
+
+
+def _ensure_internal_output_headers(ws):
+    headers = {
+        str(cell.value or "").strip(): cell.column for cell in ws[1]
+    }
+    changed = False
+    for name in (OUTPUT_FINGERPRINT_HEADER, OUTPUT_SOURCE_ROW_HEADER):
+        if name not in headers:
+            column = ws.max_column + 1
+            ws.cell(row=1, column=column, value=name)
+            headers[name] = column
+            changed = True
+        letter = openpyxl.utils.get_column_letter(headers[name])
+        ws.column_dimensions[letter].hidden = True
+    return headers[OUTPUT_FINGERPRINT_HEADER], headers[OUTPUT_SOURCE_ROW_HEADER], changed
+
+
 def _ensure_output_xlsx(path):
-    if os.path.isfile(path):
-        return
     try:
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Резолюции"
-        ws.append(["ОПТС", "Округ", "ФИО", "Link"])
-        for c in range(1, 5):
+        if os.path.isfile(path):
+            wb = openpyxl.load_workbook(path)
+            ws = wb.active
+        else:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Резолюции"
+            ws.append(["ОПТС", "Округ", "ФИО", "Link"])
+        _ensure_internal_output_headers(ws)
+        for c in range(1, ws.max_column + 1):
             ws.cell(row=1, column=c).font = openpyxl.styles.Font(bold=True)
         widths = {1: 30, 2: 8, 3: 35, 4: 22}
         for col, w in widths.items():
@@ -908,8 +1277,97 @@ def _ensure_output_xlsx(path):
         ws.freeze_panes = "A2"
         format_registry_before_save(ws, path, changed_row=1)
         wb.save(path)
+        wb.close()
     except Exception as e:
         log.warning(f"Не удалось создать {path}: {e}")
+
+
+def _output_registration_count(path):
+    if not os.path.isfile(path):
+        return 0
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        ws = wb.active
+        headers = [str(cell.value or "").strip().casefold() for cell in ws[1]]
+        number_col = next(
+            (i for i, value in enumerate(headers, 1)
+             if value in {"оптс", "ортс", "номер"}),
+            1,
+        )
+        return sum(
+            1 for row in ws.iter_rows(min_row=2, values_only=True)
+            if len(row) >= number_col and row[number_col - 1]
+        )
+    finally:
+        wb.close()
+
+
+def _seed_global_history_from_output(excel_path, output_path):
+    """Импортирует отпечатки из output новых версий при потере sidecar."""
+    if not os.path.isfile(output_path):
+        return 0
+    wb = openpyxl.load_workbook(output_path, read_only=True, data_only=True)
+    seeded = 0
+    try:
+        ws = wb.active
+        headers = {
+            str(cell.value or "").strip(): cell.column for cell in ws[1]
+        }
+        fingerprint_col = headers.get(OUTPUT_FINGERPRINT_HEADER)
+        if not fingerprint_col:
+            return 0
+        number_col = next(
+            (index for name, index in headers.items()
+             if name.casefold() in {"оптс", "ортс", "номер"}),
+            1,
+        )
+        source_row_col = headers.get(OUTPUT_SOURCE_ROW_HEADER)
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            fingerprint = row[fingerprint_col - 1] if len(row) >= fingerprint_col else None
+            if not fingerprint:
+                continue
+            doc = {
+                "_dedupe_key": str(fingerprint),
+                "_source_row": (
+                    row[source_row_col - 1]
+                    if source_row_col and len(row) >= source_row_col else None
+                ),
+                "содержание": "",
+                "корреспондент": "",
+            }
+            if _global_document_state(excel_path, doc) is None:
+                _record_global_document(
+                    excel_path,
+                    doc,
+                    "OK",
+                    asud_id=(row[number_col - 1] if len(row) >= number_col else ""),
+                    only_if_missing=True,
+                )
+                seeded += 1
+    finally:
+        wb.close()
+    return seeded
+
+
+def _validate_existing_output_is_protected(excel_path, output_path, docs):
+    """Fail-closed для старого output, у которого потеряна история строк."""
+    output_count = _output_registration_count(output_path)
+    if not output_count:
+        return
+    protected = 0
+    for doc in docs:
+        entry = _global_document_state(excel_path, doc) or {}
+        if entry.get("status") in TERMINAL_REGISTRATION_STATUSES:
+            protected += 1
+    if protected < output_count:
+        raise RuntimeError(
+            f"В {os.path.basename(output_path)} уже есть {output_count} "
+            f"зарегистрированных документов, но общая история защищает только "
+            f"{protected}. Повторный запуск заблокирован: восстановите "
+            f"{Path(excel_path).stem + STATE_SUFFIX}. Простое переименование "
+            "этого Excel небезопасно; новый файл разрешён только для реально "
+            "новых документов."
+        )
 
 
 def _append_output_row(path, doc_data, asud_id):
@@ -930,7 +1388,14 @@ def _append_output_row(path, doc_data, asud_id):
     try:
         wb = openpyxl.load_workbook(path)
         ws = wb.active
-        ws.append([asud_id or "", okrug or "", fio or "", ""])
+        fingerprint_col, source_row_col, _ = _ensure_internal_output_headers(ws)
+        row = [""] * ws.max_column
+        row[0:4] = [asud_id or "", okrug or "", fio or "", ""]
+        row[fingerprint_col - 1] = (
+            doc_data.get("_dedupe_key") or _document_fingerprint(doc_data)
+        )
+        row[source_row_col - 1] = doc_data.get("_source_row")
+        ws.append(row)
         format_registry_before_save(ws, path, changed_row=ws.max_row)
         wb.save(path)
         wb.close()
@@ -1011,6 +1476,45 @@ def main():
         input("Enter...")
         sys.exit(1)
 
+    # Общая история не зависит от имени Excel. Восстанавливаем её из output
+    # новых версий и из прежнего per-file sidecar, затем fail-closed проверяем
+    # старый output без достаточной истории.
+    output_path = _output_xlsx_path(excel_path)
+    try:
+        output_seeded = _seed_global_history_from_output(excel_path, output_path)
+        sidecar_seeded = _seed_global_history_from_sidecar(
+            excel_path, registration_state, docs
+        )
+        _validate_existing_output_is_protected(excel_path, output_path, docs)
+    except Exception as exc:
+        log.error(f"Защита от повторной регистрации: {exc}")
+        input("Enter...")
+        return
+    log.info(f"Общая история: {_global_history_path(excel_path)}")
+    if output_seeded or sidecar_seeded:
+        log.info(
+            "История дополнена: "
+            f"output={output_seeded}, sidecar={sidecar_seeded}"
+        )
+
+    duplicate_rows = {}
+    for doc in docs:
+        duplicate_rows.setdefault(doc["_dedupe_key"], []).append(
+            doc.get("_source_row")
+        )
+    duplicate_groups = [
+        rows for rows in duplicate_rows.values() if len(rows) > 1
+    ]
+    if duplicate_groups:
+        duplicate_count = sum(len(rows) - 1 for rows in duplicate_groups)
+        log.warning(
+            f"В исходном Excel найдено {duplicate_count} повторных строк "
+            f"в {len(duplicate_groups)} группах; повторные экземпляры будут "
+            "автоматически пропущены"
+        )
+        for rows in duplicate_groups[:20]:
+            log.warning(f"  одинаковый документ: строки {rows}")
+
     print(f"\nПервые 5:")
     for i, d in enumerate(docs[:5], 1):
         ao = d.get("ao") or ""
@@ -1041,8 +1545,7 @@ def main():
         driver.get(url)
         wait_asud_loaded(driver)
 
-        # Output xlsx: ОПТС|Округ|ФИО|Link рядом с реестром
-        output_path = _output_xlsx_path(excel_path)
+        # Output xlsx: ОПТС|Округ|ФИО|Link + скрытые служебные отпечатки.
         _ensure_output_xlsx(output_path)
         log.info(f"Output xlsx: {output_path}")
 
@@ -1058,13 +1561,48 @@ def main():
                 )
                 continue
 
-            def _write_ahead(current_doc=doc):
-                _record_document_state(
-                    excel_path,
-                    registration_state,
-                    current_doc,
-                    "SUBMISSION_PENDING",
+            try:
+                claimed, global_previous = _claim_global_document(
+                    excel_path, doc
                 )
+            except Exception as claim_exc:
+                log.error(
+                    f"Документ {i}: общая история недоступна, регистрация "
+                    f"заблокирована: {claim_exc}"
+                )
+                err_count += 1
+                continue
+            if not claimed:
+                skipped_count += 1
+                log.warning(
+                    f"Документ {i}/{len(docs)} пропущен по общей истории: "
+                    f"{global_previous.get('status')} "
+                    f"{global_previous.get('asud_id') or ''} "
+                    f"(исходная строка {doc.get('_source_row')})"
+                )
+                continue
+
+            def _write_ahead(current_doc=doc):
+                _record_global_document(
+                    excel_path, current_doc, "SUBMISSION_PENDING"
+                )
+                try:
+                    _record_document_state(
+                        excel_path,
+                        registration_state,
+                        current_doc,
+                        "SUBMISSION_PENDING",
+                    )
+                except Exception as exc:
+                    # before_register завершится исключением, поэтому клик
+                    # точно не будет выполнен и строку можно освободить.
+                    _record_global_document(
+                        excel_path,
+                        current_doc,
+                        "RETRYABLE",
+                        error=exc,
+                    )
+                    raise
 
             try:
                 status, asud_id = create_one_document(
@@ -1073,6 +1611,12 @@ def main():
                     i,
                     len(docs),
                     before_register=_write_ahead,
+                )
+                _record_global_document(
+                    excel_path,
+                    doc,
+                    status,
+                    asud_id=asud_id,
                 )
                 _record_document_state(
                     excel_path,
@@ -1103,21 +1647,12 @@ def main():
             except Exception as e:
                 log.error(f"ОШИБКА документ {i}: {e}")
                 err_count += 1
-                current = _document_state(registration_state, doc) or {}
-                if current.get("status") == "SUBMISSION_PENDING":
-                    try:
-                        _record_document_state(
-                            excel_path,
-                            registration_state,
-                            doc,
-                            "SUBMISSION_UNKNOWN",
-                            asud_id=current.get("asud_id"),
-                            error=e,
-                        )
-                    except Exception as state_exc:
-                        # На диске остаётся предыдущий атомарно записанный
-                        # SUBMISSION_PENDING, поэтому перезапуск всё равно safe.
-                        log.error(f"Не удалось обновить sidecar: {state_exc}")
+                _handle_document_exception(
+                    excel_path,
+                    registration_state,
+                    doc,
+                    e,
+                )
                 driver.get(url)
                 wait_asud_loaded(driver)
 

@@ -3,7 +3,13 @@ __pycache__/
 *.pyo
 dist/
 build/
+outputs/
 *.spec
+!reports.spec
 *.egg-info/
 .env
 *.log
+.codex-test-deps/
+.codex-attachments/
+.codex-remote-attachments/
+graphify-out/

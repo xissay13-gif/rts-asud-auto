@@ -11,6 +11,16 @@ ADDRESS = "644021, г. Омск, ул. 4-я Транспортная, д. 15, к
 FIO = "Иванов Иван Иванович"
 
 
+class CorrespondentParsingTests(unittest.TestCase):
+    def test_not_defined_marker_is_not_treated_as_person_name(self):
+        fio, source = correspondent.extract_fio_from_text(
+            "Ф.И.О. абонента: Не определено\nТелефон: отсутствует"
+        )
+
+        self.assertIsNone(fio)
+        self.assertIsNone(source)
+
+
 class _ImmediateWait:
     """Runs Selenium predicates once so these tests never open a browser."""
 

@@ -29,9 +29,9 @@ from selenium.webdriver.support import expected_conditions as EC
 
 from shared import config as cfg
 from shared.ui import (click, wait_and_click, find_input_near_label,
-                        wait_asud_loaded, wait_modal_closed, close_open_modals,
-                        js_set_value, js_type_combobox, find_dropdown_options,
-                        set_driver_timeout)
+                          wait_asud_loaded, wait_modal_closed, close_open_modals,
+                          js_set_value, js_type_combobox, find_dropdown_options,
+                          set_driver_timeout, dismiss_system_notifications)
 from shared.correspondent import fill_correspondent_field, match_correspondent
 from shared.addressee import add_addressee as _add_addressee_verified
 from shared.attachments import find_msg_by_link, get_dummy_msg, attach_content, move_to_done
@@ -287,6 +287,11 @@ def create_one_document(driver, doc_data, index, total):
     log.info(f"Корреспондент: {doc_data['корреспондент']}")
     log.info(f"Тип: {doc_data['тип_название']}")
 
+    if not dismiss_system_notifications(driver):
+        raise RuntimeError(
+            "Системное уведомление АСУД перекрывает главную страницу"
+        )
+
     # [1/6] Создать документ → Входящий документ → Вид
     el = WebDriverWait(driver, cfg.DEFAULTS["timeout"]).until(
         EC.presence_of_element_located((By.ID, "mainscreen-create-button")))
@@ -348,15 +353,28 @@ def create_one_document(driver, doc_data, index, total):
     attach_path = find_msg_by_link(doc_data.get("link"), outlook_dir, dummy_path)
     if attach_path:
         log.info(f"Прикрепляю: {os.path.basename(attach_path)}")
-        attached = attach_content(driver, attach_path)
+        attached = attach_content(
+            driver,
+            attach_path,
+            msg_attachment_mode=settings.get(
+                "msg_attachment_mode", cfg.DEFAULTS["msg_attachment_mode"]
+            ),
+            email_subject=doc_data.get("_email_subject"),
+            email_body=doc_data.get("_email_body"),
+        )
         wait_modal_closed(driver)
         if attached:
             log.info(f"Документ {index}/{total}: вложение прикреплено ✓")
         else:
             log.warning(f"Документ {index}/{total}: вложение НЕ прикреплено ✗")
+            if doc_data.get("require_attachment"):
+                close_open_modals(driver)
+                raise RuntimeError(
+                    f"обязательное вложение не прикрепилось: {attach_path}"
+                )
         # Реальный (не dummy) файл — переносим в Завершено/.
         # В smart-routing критерий — успешный attach (документ в черновиках).
-        if attach_path != dummy_path:
+        if attached and attach_path != dummy_path:
             move_to_done(attach_path, outlook_dir)
     else:
         log.info("Нет файла — пропускаю")

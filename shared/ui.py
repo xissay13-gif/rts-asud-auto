@@ -218,7 +218,101 @@ def wait_asud_loaded(driver, max_wait=120):
     except Exception:
         log.warning("Данные в таблице не появились")
 
+    # АСУД может асинхронно показать обязательное системное уведомление уже
+    # после появления главной кнопки и таблицы. Кнопка создания при этом
+    # остаётся visible/enabled в DOM, но полноэкранный ModalPanel перехватывает
+    # все клики. Закрываем только notifications-dialog, не затрагивая рабочие
+    # модалки карточек документов.
+    dismiss_system_notifications(driver)
+
     log.info("АСУД загружен")
+
+
+def _visible_system_notifications(driver):
+    """Возвращает видимые системные уведомления главного экрана АСУД."""
+    try:
+        return [
+            dialog for dialog in driver.find_elements(
+                By.CSS_SELECTOR, "#notifications-dialog"
+            )
+            if dialog.is_displayed()
+        ]
+    except Exception:
+        return []
+
+
+def dismiss_system_notifications(driver, timeout=8):
+    """Закрывает системное уведомление, перекрывающее главную страницу.
+
+    У окна АСУД стабильный id ``notifications-dialog``. Сначала используем
+    нижнюю кнопку ``Закрыть`` (data-marker), затем крестик и только последним
+    fallback — Escape. После каждого действия проверяем исчезновение именно
+    окна уведомления, поэтому успешная команда WebDriver не принимается за
+    фактическое закрытие.
+    """
+    dialogs = _visible_system_notifications(driver)
+    if not dialogs:
+        return True
+
+    log.warning("Системное уведомление АСУД перекрывает страницу — закрываю")
+    deadline = time.monotonic() + max(0.5, timeout)
+    attempt = 0
+
+    while dialogs and time.monotonic() < deadline:
+        attempt += 1
+        dialog = dialogs[-1]
+        close_button = None
+        for selector in (
+            "[data-marker='dialog-close-btn']",
+            "#close-tool-btn",
+        ):
+            try:
+                candidates = dialog.find_elements(By.CSS_SELECTOR, selector)
+                close_button = next(
+                    (item for item in candidates if item.is_displayed()), None
+                )
+            except Exception:
+                close_button = None
+            if close_button is not None:
+                break
+
+        if close_button is not None:
+            if attempt == 1:
+                click(driver, close_button, "Закрыть системное уведомление")
+            else:
+                try:
+                    driver.execute_script("arguments[0].click();", close_button)
+                    log.info("Клик (JS): Закрыть системное уведомление")
+                except Exception:
+                    try:
+                        close_button.click()
+                    except Exception:
+                        pass
+        else:
+            try:
+                ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                log.info("Escape: Закрыть системное уведомление")
+            except Exception:
+                pass
+
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            WebDriverWait(driver, min(1.5, remaining)).until(
+                lambda d: not _visible_system_notifications(d)
+            )
+        except Exception:
+            pass
+        dialogs = _visible_system_notifications(driver)
+
+    if dialogs:
+        log.error(
+            "Системное уведомление АСУД не закрылось — главная страница "
+            "остаётся заблокированной"
+        )
+        return False
+
+    log.info("Системное уведомление АСУД закрыто")
+    return True
 
 
 def wait_modal_closed(driver, timeout=15):

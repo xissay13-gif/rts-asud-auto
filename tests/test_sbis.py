@@ -9,6 +9,10 @@ from flows.sbis import (
     content_from_file,
     derive_surname,
     load_manifest_ids,
+    load_registry,
+    load_state,
+    finalize_completed_file,
+    save_state,
     _output_path,
     parse_protocol_filename,
     prepare_items,
@@ -29,6 +33,62 @@ class _Driver:
 
 
 class SbisFlowTests(unittest.TestCase):
+    def test_duplicate_is_finalized_even_if_card_close_fails(self):
+        old_result = sbis_flow.mix_flow._last_result
+        old_settings = sbis_flow.mix_flow.settings
+        self.addCleanup(
+            setattr, sbis_flow.mix_flow, "_last_result", old_result
+        )
+        self.addCleanup(
+            setattr, sbis_flow.mix_flow, "settings", old_settings
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "[ФЛ][Иванов Иван Иванович] Обращение.pdf"
+            source.write_bytes(b"pdf")
+            (root / "msedgedriver.exe").touch()
+            driver = _Driver()
+            sbis_flow.mix_flow._last_result = {"status": "FAILED"}
+
+            def report_duplicate(*_args):
+                sbis_flow.mix_flow._last_result["status"] = "DUPLICATE"
+                return None
+
+            with (
+                patch.dict(sbis_flow.os.environ, {
+                    "ASUD_SBIS_DIR": str(root),
+                }, clear=True),
+                patch.object(sbis_flow.cfg, "load", return_value={
+                    "asud_url": "https://asud.test/",
+                    "sbis": {"input_dir": str(root)},
+                }),
+                patch.object(sbis_flow.cfg, "setup_file_logger"),
+                patch.object(sbis_flow.cfg, "keep_system_awake"),
+                patch.object(sbis_flow.cfg, "get_base_dir", return_value=str(root)),
+                patch.object(sbis_flow.cfg, "build_edge_options", return_value=object()),
+                patch.object(sbis_flow, "input", return_value=""),
+                patch.object(sbis_flow.webdriver, "Edge", return_value=driver),
+                patch.object(sbis_flow, "set_driver_timeout"),
+                patch.object(sbis_flow, "wait_asud_loaded"),
+                patch.object(
+                    sbis_flow.mix_flow, "create_one_document",
+                    side_effect=report_duplicate,
+                ),
+                patch.object(
+                    sbis_flow.mix_flow, "close_card_and_wait_main",
+                    side_effect=RuntimeError("card did not close"),
+                ),
+            ):
+                sbis_flow.main()
+
+            state = sbis_flow.load_state(root)
+            entry = next(iter(state["files"].values()))
+            self.assertEqual(entry["status"], "DUPLICATE")
+            self.assertFalse(source.exists())
+            registry = load_registry(_output_path(root))
+            self.assertEqual(len(registry), 1)
+            self.assertEqual(next(iter(registry.values()))["status"], "DUPLICATE")
+
     def test_manual_status_survives_exception_after_flow_outcome(self):
         old_result = sbis_flow.mix_flow._last_result
         old_settings = sbis_flow.mix_flow.settings
@@ -350,6 +410,172 @@ class SbisFlowTests(unittest.TestCase):
 
             self.assertNotEqual(restarted["signature"], first["signature"])
             self.assertTrue(restarted["already_done"])
+
+    def test_ok_state_never_retries_after_file_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "[ФЛ][Иванов Иван Иванович] Обращение.pdf"
+            source.write_bytes(b"first")
+            state = {"version": 1, "next_number": 1, "files": {}}
+
+            first = prepare_items(root, [source], state)[0]
+            entry = state["files"][first["key"]]
+            entry["status"] = "OK"
+            entry["signature"] = first["signature"]
+
+            source.write_bytes(b"rewritten-but-same-source-document")
+            restarted = prepare_items(root, [source], state)[0]
+
+            self.assertNotEqual(restarted["signature"], first["signature"])
+            self.assertTrue(restarted["already_done"])
+
+    def test_state_recovers_from_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            expected = {
+                "version": 1,
+                "next_number": 2,
+                "files": {"letter.pdf": {"number": 1, "status": "OK"}},
+            }
+            save_state(root, expected)
+            (root / ".asud_sbis_state.json").write_text(
+                "{broken", encoding="utf-8")
+
+            recovered = load_state(root)
+            self.assertEqual(recovered["version"], 2)
+            self.assertEqual(recovered["next_number"], expected["next_number"])
+            self.assertEqual(recovered["files"], expected["files"])
+
+    def test_completed_file_is_registered_in_ledger_then_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "[ФЛ][Иванов Иван Иванович] Обращение.pdf"
+            source.write_bytes(b"pdf")
+            manifest = {
+                "doc-77|pdf-asud-v2": {
+                    "revision": "rev-1",
+                    "sbis_id": "doc-77",
+                    "files": [source.name],
+                    "archive": "",
+                },
+            }
+            (root / ".manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+            state = {"version": 2, "next_number": 1, "files": {}}
+            item = prepare_items(
+                root, [source], state,
+                manifest_ids=load_manifest_ids(root),
+            )[0]
+            entry = state["files"][item["key"]]
+            entry.update({"status": "OK", "asud_id": "АСУД-123"})
+            output = _output_path(root)
+            sbis_flow.mix_flow._ensure_output_xlsx(output)
+
+            self.assertTrue(
+                finalize_completed_file(root, output, item, entry))
+            self.assertFalse(source.exists())
+            ledger = load_registry(output)
+            self.assertEqual(ledger["sbis:doc-77"]["status"], "OK")
+            self.assertEqual(
+                ledger["sbis:doc-77"]["asud_id"], "АСУД-123")
+            saved_manifest = json.loads(
+                (root / ".manifest.json").read_text(encoding="utf-8"))
+            self.assertTrue(
+                saved_manifest["doc-77|pdf-asud-v2"]["asud_processed"])
+
+            # Даже без state одна книга-реестр блокирует повторную регистрацию.
+            source.write_bytes(b"downloaded-again")
+            fresh_state = {"version": 2, "next_number": 1, "files": {}}
+            restarted = prepare_items(
+                root, [source], fresh_state,
+                manifest_ids=load_manifest_ids(root),
+                registry_records=ledger,
+            )[0]
+            self.assertTrue(restarted["already_done"])
+            self.assertEqual(
+                fresh_state["files"][restarted["key"]]["status"], "OK")
+
+    def test_source_is_kept_when_registry_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "[ЮЛ][Тепловая компания] Письмо.pdf"
+            source.write_bytes(b"pdf")
+            state = {"version": 2, "next_number": 1, "files": {}}
+            item = prepare_items(root, [source], state)[0]
+            entry = state["files"][item["key"]]
+            entry.update({"status": "DUPLICATE", "asud_id": ""})
+
+            with patch.object(
+                    sbis_flow.mix_flow, "_append_output_row",
+                    return_value=False):
+                result = finalize_completed_file(
+                    root, _output_path(root), item, entry)
+
+            self.assertFalse(result)
+            self.assertTrue(source.exists())
+
+    def test_manual_registry_status_also_blocks_repeat_without_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "[ФЛ][Иванов Иван Иванович] Обращение.pdf"
+            source.write_bytes(b"pdf")
+            state = {"version": 2, "next_number": 1, "files": {}}
+            item = prepare_items(root, [source], state)[0]
+            output = _output_path(root)
+            sbis_flow.mix_flow._ensure_output_xlsx(output)
+            self.assertTrue(sbis_flow.mix_flow._append_output_row(
+                output, item["doc_data"], "", status="SUBMISSION_UNKNOWN"))
+
+            restarted_state = {"version": 2, "next_number": 1, "files": {}}
+            restarted = prepare_items(
+                root, [source], restarted_state,
+                registry_records=load_registry(output),
+            )[0]
+
+            self.assertTrue(restarted["already_done"])
+            self.assertTrue(source.exists())
+            self.assertEqual(
+                restarted_state["files"][restarted["key"]]["status"],
+                "SUBMISSION_UNKNOWN",
+            )
+
+    def test_v1_failed_state_migrates_to_non_retryable_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "[ФЛ][Иванов Иван Иванович] Обращение.pdf"
+            source.write_bytes(b"pdf")
+            legacy = {
+                "version": 1,
+                "next_number": 2,
+                "files": {
+                    source.name: {
+                        "number": 1,
+                        "status": "FAILED",
+                        "last_error": "регистрация завершилась со статусом FAILED",
+                    },
+                },
+            }
+            (root / ".asud_sbis_state.json").write_text(
+                json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+            migrated = load_state(root)
+            entry = migrated["files"][source.name]
+
+            self.assertEqual(migrated["version"], 2)
+            self.assertEqual(entry["status"], "SUBMISSION_UNKNOWN")
+            self.assertTrue(
+                prepare_items(root, [source], migrated)[0]["already_done"])
+
+    def test_corrupt_state_and_backup_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".asud_sbis_state.json").write_text(
+                "{broken", encoding="utf-8")
+            (root / ".asud_sbis_state.backup.json").write_text(
+                "[]", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "Защита от дублей"):
+                load_state(root)
 
     def test_scan_and_stable_numbering(self):
         with tempfile.TemporaryDirectory() as tmp:

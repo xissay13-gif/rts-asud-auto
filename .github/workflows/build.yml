@@ -3,6 +3,8 @@ name: Build АСУД EXE
 on:
   push:
     branches: [ main, registration, codex/sbis-registration ]
+  pull_request:
+    branches: [ registration ]
   workflow_dispatch:
 
 jobs:
@@ -18,7 +20,7 @@ jobs:
         python-version: '3.12'
 
     - name: Install dependencies
-      run: pip install selenium openpyxl pyinstaller extract-msg colorama
+      run: pip install selenium openpyxl pyinstaller extract-msg colorama python-docx
 
     # Onefile: один asud.exe + батники. KAV ругается одинаково
     # на onedir и onefile (поведенческий детектор), так что смысла дробить
@@ -34,6 +36,7 @@ jobs:
         --hidden-import=selenium.webdriver.support.ui
         --hidden-import=selenium.webdriver.support.expected_conditions
         --hidden-import=openpyxl
+        --hidden-import=docx
         --hidden-import=extract_msg
         --hidden-import=olefile
         --hidden-import=colorama
@@ -49,12 +52,15 @@ jobs:
         --hidden-import=shared.feedback_parser
         --hidden-import=shared.deadline
         --hidden-import=shared.asud_resolution
+        --hidden-import=shared.asud_reports
+        --hidden-import=shared.reply_files
         --hidden-import=flows.mix
         --hidden-import=flows.auto_create
         --hidden-import=flows.smart
         --hidden-import=flows.email
         --hidden-import=flows.sbis
         --hidden-import=flows.zhkh_daemon
+        --hidden-import=flows.attach_replies
         --hidden-import=shared.xlsx_lock
         --hidden-import=shared.xlsx_status
         app.py
@@ -66,11 +72,13 @@ jobs:
       run: |
         New-Item -ItemType Directory -Path dist\release -Force | Out-Null
         Copy-Item dist\asud.exe dist\release\
-        Copy-Item asud_headless.bat dist\release\ -ErrorAction SilentlyContinue
-        Copy-Item asud_email_watch.bat dist\release\ -ErrorAction SilentlyContinue
-        Copy-Item asud_auto_create_headless.bat dist\release\ -ErrorAction SilentlyContinue
-        Copy-Item asud_sbis.bat dist\release\ -ErrorAction SilentlyContinue
-        Copy-Item АСУД_ЖКХ_резолюции_Халецкой.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item 01_Регистрация_выбрать_режим.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item 02_Регистрация_МОНИТОРИНГ_почты.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item 03_Регистрация_из_Excel.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item 04_Регистрация_СБИС.bat dist\release\ -ErrorAction SilentlyContinue
+        Copy-Item 05_Ответы_начальников_отделов.bat dist\release\
+        Copy-Item REPLY_REPORTS.md dist\release\
+        Copy-Item КАКОЙ_БАТНИК_ЗАПУСКАТЬ.txt dist\release\ -ErrorAction SilentlyContinue
         Copy-Item settings.json.example dist\release\ -ErrorAction SilentlyContinue
         Copy-Item SBIS_REGISTRATION.md dist\release\ -ErrorAction SilentlyContinue
 
@@ -82,5 +90,5 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: asud
+        name: asud-rc10-gis-exclusions
         path: dist/asud.zip

@@ -1,0 +1,44 @@
+name: Build report uploader EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, registration, codex/sbis-registration]
+    paths:
+      - reports_app.py
+      - reports.spec
+      - reports.settings.json.example
+      - flows/attach_replies.py
+      - shared/**
+      - scripts/smoke_frozen_edge.py
+      - Прикрепление_отчетов.bat
+      - REPLY_REPORTS.md
+      - .github/workflows/build-reports.yml
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        run: pip install selenium pyinstaller
+      - name: Build standalone uploader
+        run: pyinstaller --noconfirm reports.spec
+      - name: Test frozen EXE with local Edge page
+        run: python scripts/smoke_frozen_edge.py --exe dist/asud_reports.exe --exercise-report
+      - name: Stage uploader only
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist/reports-release -Force | Out-Null
+          Copy-Item -LiteralPath dist/asud_reports.exe -Destination dist/reports-release/
+          Copy-Item -LiteralPath Прикрепление_отчетов.bat -Destination dist/reports-release/
+          Copy-Item -LiteralPath reports.settings.json.example -Destination dist/reports-release/settings.json.example
+          Copy-Item -LiteralPath REPLY_REPORTS.md -Destination dist/reports-release/
+          Compress-Archive -Path dist/reports-release/* -DestinationPath dist/asud-reports.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asud-reports
+          path: dist/asud-reports.zip

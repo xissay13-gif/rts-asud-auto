@@ -1,0 +1,102 @@
+<!doctype html><meta charset="utf-8"><title>Local ASUD reply fixture</title>
+<style>
+body { font: 16px sans-serif; } td { padding: 12px; }
+[hidden] { display: none !important; }
+.Css3WindowStyle-panel { background: #ddd; padding: 20px; position: fixed; inset: 10%; }
+[data-name], [data-marker="dialog-ok-button"], [data-marker="tab-lifecycle"],
+#header-close-btn, #cntx-menu-item-add_resolution_report { cursor: pointer; padding: 8px; }
+</style>
+<div id="list">
+  <span id="app-acc-info" x-account-name="Department_Head">Начальник отдела</span>
+  <table id="CABINET_MENU__RECEIVED__ALL_ACTIVE__TO_EXECUTION"><tr><td>Исполнение</td></tr></table>
+  <input id="FCPC_Номер-input"><input id="FCPC_Дата_получения-input" readonly value="31.07.2026 - 31.08.2026">
+  <table><tbody>
+    <tr class="obj-list-rec obj-list-task containerGridTaskRow"><td cellindex="3">Входящий № ОРТС/8/41359 26.08.2026</td></tr>
+    <tr class="obj-list-rec obj-list-task"><td cellindex="3">Подходит контрольный срок</td></tr>
+    <tr id="target-task" class="obj-list-rec obj-list-task"><td cellindex="3">Исполнение</td></tr>
+    <tr class="obj-list-rec obj-list-task containerGridTaskRow"><td cellindex="3">Входящий № ОРТС/8/141359</td></tr>
+    <tr class="obj-list-rec obj-list-task"><td cellindex="3">Исполнение</td></tr>
+  </tbody></table>
+</div>
+<div id="card" hidden>
+  <div data-marker="ScreenHeader1">Исполнение: Подготовить ответ</div>
+  <div class="headerInfoContainer">Входящий документ № <b>ОРТС/8/41359</b></div>
+  <div id="header-close-btn">Закрыть</div>
+  <div data-marker="tab-lifecycle">Жизненный цикл</div>
+  <table><tbody>
+    <tr class="lfce-stage-grid-row_Sender"><td>Кому Отправитель</td><td><span data-name="MSFO_CNTX_MENU_IMG">Чужое меню</span></td></tr>
+    <tr class="lfce-stage-grid-row_Department_Head"><td>Кому Начальник отдела</td><td>Принято к исполнению</td>
+      <td><table data-marker="lifecycleContentCell"><tr><td>Подготовить ответ</td></tr></table></td>
+      <td><span id="own-menu" data-name="MSFO_CNTX_MENU_IMG">Меню</span></td><td id="saved-report"></td>
+    </tr>
+  </tbody></table>
+  <div data-marker="cntx-menu-list" id="menu" hidden><div id="cntx-menu-item-add_resolution_report">Добавить отчет</div></div>
+</div>
+<script>
+window.saveCount = 0;
+window.openCount = 0;
+window.failUpload = false;
+window.failSave = false;
+window.failReopen = false;
+window.rerenderOnBlur = false;
+window.rerenderAfterUpload = false;
+document.querySelector('#target-task').ondblclick = () => {
+  window.openCount++;
+  document.querySelector('#list').hidden = true;
+  document.querySelector('#card').hidden = false;
+  if (window.failReopen && window.openCount > 1) document.querySelector('#saved-report').replaceChildren();
+};
+document.querySelector('#header-close-btn').onclick = () => {
+  document.querySelector('#card').hidden = true;
+  document.querySelector('#list').hidden = false;
+};
+document.querySelector('#own-menu').onclick = () => document.querySelector('#menu').hidden = false;
+document.querySelector('#cntx-menu-item-add_resolution_report').onclick = () => {
+  document.querySelector('#menu').hidden = true;
+  let dialog = document.createElement('div');
+  dialog.className = 'Css3WindowStyle-panel';
+  dialog.innerHTML = `<h3>Добавление отчета</h3><textarea placeholder="Отчет может содержать не более 2000 символов."></textarea>
+    <input type="file" name="_reportMultiFileUploadComponent" multiple>
+    <div data-marker="combobox-list-view"></div><div data-marker="dialog-ok-button" tabindex="0">Сохранить отчет</div>`;
+  document.body.append(dialog);
+  function bindDialog() {
+  dialog.querySelector('textarea').onblur = event => {
+    if (window.rerenderOnBlur) {
+      const replacement = event.target.cloneNode(true);
+      replacement.value = event.target.value;
+      event.target.replaceWith(replacement);
+      window.blurRenders = (window.blurRenders || 0) + 1;
+      bindDialog();
+    }
+  };
+  dialog.querySelector('input').onchange = event => {
+    window.uploadCount = (window.uploadCount || 0) + 1;
+    if (!window.failUpload) setTimeout(() => {
+      for (const file of event.target.files) {
+        const link = document.createElement('a'); link.textContent = file.name;
+        link.title = file.name; link.style.display = 'block';
+        dialog.querySelector('[data-marker="combobox-list-view"]').append(link);
+      }
+      if (window.rerenderAfterUpload) {
+        const replacement = dialog.cloneNode(true);
+        replacement.querySelector('textarea').value = dialog.querySelector('textarea').value;
+        dialog.replaceWith(replacement);
+        dialog = replacement;
+        window.uploadRenders = (window.uploadRenders || 0) + 1;
+        bindDialog();
+      }
+    }, 100);
+  };
+  dialog.querySelector('[data-marker="dialog-ok-button"]').onclick = () => {
+    window.saveCount++;
+    if (!window.failSave) {
+      const report = document.querySelector('#saved-report');
+      const text = document.createElement('div'); text.textContent = dialog.querySelector('textarea').value;
+      report.append(text, dialog.querySelector('[data-marker="combobox-list-view"]').cloneNode(true));
+    }
+    dialog.remove();
+  };
+  }
+  bindDialog();
+};
+</script>

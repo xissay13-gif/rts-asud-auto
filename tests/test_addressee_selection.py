@@ -291,6 +291,18 @@ class AddresseeSelectionFlowTests(unittest.TestCase):
         register_mock.assert_not_called()
         self.assertEqual(mix._last_result["status"], "FAILED")
 
+    def test_feedback_override_replaces_global_addressee(self):
+        with patch.object(
+            mix,
+            "settings",
+            {"addressees": ["Басманов Александр Владимирович"]},
+        ):
+            selected = mix._get_document_addressees({
+                "addressees_override": ["Жуков Иван Сергеевич"],
+            })
+
+        self.assertEqual(selected, ["Жуков Иван Сергеевич"])
+
     def test_auto_create_aborts_before_save_attach_and_register(self):
         driver = object()
         doc = {

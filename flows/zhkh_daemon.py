@@ -340,6 +340,46 @@ def _relogin(driver, url, switch_to, sidebar):
     return True
 
 
+def _start_driver(base_dir, load_timeout):
+    """Start one isolated WebDriver owned by this daemon process."""
+    driver_path = os.path.join(base_dir, "msedgedriver.exe")
+    options = cfg.build_edge_options()
+    service = EdgeService(executable_path=driver_path)
+    driver = webdriver.Edge(service=service, options=options)
+    set_driver_timeout(driver, load_timeout)
+    return driver
+
+
+def _recover_driver(old_driver, base_dir, load_timeout, url, switch_to,
+                    sidebar):
+    """Replace only this daemon's browser after a failed soft re-login."""
+    log.warning("Recovery: перезапускаю Edge текущего процесса")
+    try:
+        old_driver.quit()
+    except Exception:
+        pass
+
+    new_driver = None
+    try:
+        new_driver = _start_driver(base_dir, load_timeout)
+        new_driver.get(url)
+        wait_asud_loaded(new_driver)
+        if not switch_account(new_driver, switch_to):
+            raise RuntimeError(f"учётка '{switch_to}' не выбрана")
+        if not click_sidebar_section(new_driver, sidebar):
+            raise RuntimeError(f"раздел '{sidebar}' не открылся")
+        log.info("Recovery: новый Edge запущен, сессия восстановлена")
+        return new_driver
+    except Exception as e:
+        log.error(f"Recovery: новый Edge не удалось подготовить: {e}")
+        if new_driver is not None:
+            try:
+                new_driver.quit()
+            except Exception:
+                pass
+        return None
+
+
 # ================= DAEMON LOOP =================
 
 def main():
@@ -406,11 +446,9 @@ def main():
     except (AttributeError, ValueError):
         pass
 
-    options = cfg.build_edge_options()
-    service = EdgeService(executable_path=driver_path)
-    driver = webdriver.Edge(service=service, options=options)
-    set_driver_timeout(driver, settings.get("asud_load_timeout_sec",
-                                              cfg.DEFAULTS["asud_load_timeout_sec"]))
+    load_timeout = settings.get(
+        "asud_load_timeout_sec", cfg.DEFAULTS["asud_load_timeout_sec"])
+    driver = _start_driver(base_dir, load_timeout)
 
     iters = 0
     totals = {"OK": 0, "SKIP": 0, "FAIL": 0}
@@ -441,9 +479,17 @@ def main():
             if time.monotonic() - last_heartbeat > HEARTBEAT_INTERVAL_SEC:
                 if not _session_alive(driver, switch_to):
                     if not _relogin(driver, url, switch_to, sidebar):
-                        log.error("Heartbeat: re-login не удался, sleep + retry")
-                        _interruptible_sleep(60)
-                        continue
+                        log.error("Heartbeat: мягкий re-login не удался — "
+                                  "перезапускаю только свой Edge")
+                        new_driver = _recover_driver(
+                            driver, base_dir, load_timeout, url, switch_to,
+                            sidebar)
+                        if new_driver is None:
+                            log.error("Heartbeat: полный recovery не удался, "
+                                      "повтор через 60с")
+                            _interruptible_sleep(60)
+                            continue
+                        driver = new_driver
                 last_heartbeat = time.monotonic()
 
             xlsx_paths = _list_watched_xlsx(watch_list)

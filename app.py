@@ -10,6 +10,7 @@ app.py — Единая точка входа для АСУД-автоматиз
                   обходит папку, парсит письма, ФИО абонента берёт из тела.
   • sbis        — регистрация PDF из СБИС: ФЛ по полному ФИО, ЮЛ по полному
                   названию с прочерками в имени и отчестве.
+  • attach-replies — прикрепление готовых ответов из папки к отчётам исполнителя.
 
 Выдача резолюций — отдельный exe, ветка clean-resolutions.
 
@@ -57,8 +58,9 @@ _MODE_DESCRIPTIONS = {
     'email':       'Создание прямо из .msg-писем (без xlsx-реестра)',
     'sbis':        'Регистрация файлов из выгрузки СБИС',
     'zhkh-daemon': 'Постоянный мониторинг реестров → Басманов выдаёт резолюции Халецкой',
+    'attach-replies': 'Готовые ответы из папки → отчёты начальника отдела',
 }
-_MODES = ['mix', 'auto-create', 'smart', 'email', 'sbis', 'zhkh-daemon']
+_MODES = ['mix', 'auto-create', 'smart', 'email', 'sbis', 'zhkh-daemon', 'attach-replies']
 
 
 def detect_mode(xlsx_path):
@@ -156,7 +158,7 @@ def main():
     parser.add_argument('--mode', choices=_MODES,
                         help="Режим работы (если не задан — auto-detect по xlsx)")
     parser.add_argument('--xlsx', help="Путь к реестру (если не задан — спрашиваем)")
-    parser.add_argument('--folder', help="Папка-источник для режимов email/sbis")
+    parser.add_argument('--folder', help="Папка-источник для email/sbis/attach-replies")
     parser.add_argument('--preset',
                         help="Preset id or exact name from settings.json")
     parser.add_argument('--surname',
@@ -165,7 +167,7 @@ def main():
     parser.add_argument('--reset-state', action='store_true',
                         help="Сбросить нумерацию и список обработанных файлов sbis")
     parser.add_argument('--watch', action='store_true',
-                        help="Непрерывный мониторинг папки (только email-режим). "
+                        help="Непрерывный мониторинг папки (email/attach-replies). "
                              "Ctrl+C — остановка после текущего документа")
     parser.add_argument('--headless', action='store_true',
                         help="Запустить Edge без GUI (фоновый режим, требует Стадии 1б)")
@@ -215,9 +217,9 @@ def main():
     if preset is not None:
         log.info(f"Пресет: {preset.get('name', '?')}")
         # Заполняем args из пресета и продолжаем обычный flow
-        if preset.get("folder"):
+        if preset.get("folder") and not args.folder:
             args.folder = preset["folder"]
-        elif preset.get("folders"):
+        elif preset.get("folders") and not args.folder:
             # Multi-folder preset: пробрасываем через env как JSON.
             # daemon_main распарсит и будет ходить по списку (опционально
             # с round-robin).
@@ -252,6 +254,18 @@ def main():
         # Завершено/. Удобно для непрерывного daemon-режима.
         if preset.get("delete_after_done"):
             os.environ['ASUD_DELETE_AFTER_DONE'] = '1'
+
+    # Ответы используют папку, но не должны попадать в email-dispatch.
+    if args.mode == 'attach-replies':
+        if args.folder:
+            os.environ['ASUD_REPLY_FOLDER'] = args.folder
+        if preset and preset.get('reply_account'):
+            os.environ['ASUD_REPLY_ACCOUNT'] = preset['reply_account']
+        os.environ['ASUD_REPLY_WATCH'] = '1' if args.watch else '0'
+        os.environ['ASUD_MODE'] = 'attach-replies'
+        from flows.attach_replies import main as flow_main
+        flow_main()
+        return
 
     # === ZHKH-DAEMON (непрерывный второй проход) ============================
     # Этот режим не использует обычный источник (xlsx/email/sbis), поэтому

@@ -100,6 +100,160 @@ class AutoCreateStateTests(unittest.TestCase):
         second_base, second_ordinal = matches[1]["_source_key"].rsplit(":", 1)
         self.assertEqual(first_base, second_base)
         self.assertEqual((first_ordinal, second_ordinal), ("1", "2"))
+        self.assertEqual(matches[0]["_dedupe_key"], matches[1]["_dedupe_key"])
+
+    def test_document_fingerprint_ignores_case_and_whitespace(self):
+        left = {
+            "содержание": "  ОЭК   КАО\nЛС 123  ",
+            "корреспондент": "ИВАНОВ Иван Иванович",
+            "тема_индекс": 8,
+        }
+        right = {
+            "содержание": "оэк као лс 123",
+            "корреспондент": "иванов иван иванович",
+            "тема_индекс": 8,
+        }
+
+        self.assertEqual(
+            auto_create._document_fingerprint(left),
+            auto_create._document_fingerprint(right),
+        )
+
+    def test_global_history_survives_source_workbook_rename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._workbook(tmp)
+            original_doc = auto_create.load_excel(source)[0]
+
+            claimed, previous = auto_create._claim_global_document(
+                source, original_doc
+            )
+            self.assertTrue(claimed)
+            self.assertIsNone(previous)
+            auto_create._record_global_document(
+                source,
+                original_doc,
+                "OK",
+                asud_id="ОРТС/8/123",
+            )
+
+            renamed = source.with_name("renamed.xlsx")
+            source.rename(renamed)
+            renamed_doc = auto_create.load_excel(renamed)[0]
+            claimed_again, previous = auto_create._claim_global_document(
+                renamed, renamed_doc
+            )
+
+        self.assertFalse(claimed_again)
+        self.assertEqual(previous["status"], "OK")
+        self.assertEqual(previous["asud_id"], "ОРТС/8/123")
+
+    def test_retryable_global_claim_can_be_claimed_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._workbook(tmp)
+            doc = auto_create.load_excel(source)[0]
+            claimed, _ = auto_create._claim_global_document(source, doc)
+            self.assertTrue(claimed)
+            auto_create._record_global_document(
+                source, doc, "RETRYABLE", error="click not sent"
+            )
+
+            claimed_again, previous = auto_create._claim_global_document(
+                source, doc
+            )
+
+        self.assertTrue(claimed_again)
+        self.assertEqual(previous["status"], "RETRYABLE")
+
+    def test_exception_does_not_downgrade_confirmed_global_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._workbook(tmp)
+            doc = auto_create.load_excel(source)[0]
+            state = auto_create.load_registration_state(source)
+            auto_create._record_document_state(
+                source, state, doc, "SUBMISSION_PENDING"
+            )
+            auto_create._record_global_document(
+                source, doc, "OK", asud_id="ОРТС/8/2026/123"
+            )
+
+            recovered = auto_create._handle_document_exception(
+                source, state, doc, RuntimeError("sidecar write failed")
+            )
+
+            global_entry = auto_create._global_document_state(source, doc)
+            disk_state = auto_create.load_registration_state(source)
+            self.assertEqual(recovered, "OK")
+            self.assertEqual(global_entry["status"], "OK")
+            self.assertEqual(global_entry["asud_id"], "ОРТС/8/2026/123")
+            self.assertEqual(
+                auto_create._document_state(disk_state, doc)["status"], "OK"
+            )
+
+    def test_exception_preserves_proven_retryable_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._workbook(tmp)
+            doc = auto_create.load_excel(source)[0]
+            state = auto_create.load_registration_state(source)
+            auto_create._record_document_state(
+                source, state, doc, "SUBMISSION_PENDING"
+            )
+            auto_create._record_global_document(source, doc, "RETRYABLE")
+
+            recovered = auto_create._handle_document_exception(
+                source, state, doc, RuntimeError("sidecar write failed")
+            )
+
+            global_entry = auto_create._global_document_state(source, doc)
+            disk_state = auto_create.load_registration_state(source)
+            self.assertEqual(recovered, "RETRYABLE")
+            self.assertEqual(global_entry["status"], "RETRYABLE")
+            self.assertEqual(
+                auto_create._document_state(disk_state, doc)["status"],
+                "RETRYABLE",
+            )
+
+    def test_exception_promotes_pending_submission_to_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._workbook(tmp)
+            doc = auto_create.load_excel(source)[0]
+            state = auto_create.load_registration_state(source)
+            auto_create._record_document_state(
+                source, state, doc, "SUBMISSION_PENDING"
+            )
+            auto_create._record_global_document(
+                source, doc, "SUBMISSION_PENDING"
+            )
+
+            recovered = auto_create._handle_document_exception(
+                source, state, doc, RuntimeError("browser disconnected")
+            )
+
+            global_entry = auto_create._global_document_state(source, doc)
+            disk_state = auto_create.load_registration_state(source)
+            self.assertEqual(recovered, "SUBMISSION_UNKNOWN")
+            self.assertEqual(global_entry["status"], "SUBMISSION_UNKNOWN")
+            self.assertEqual(
+                auto_create._document_state(disk_state, doc)["status"],
+                "SUBMISSION_UNKNOWN",
+            )
+
+    def test_existing_legacy_output_without_history_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._workbook(tmp)
+            docs = auto_create.load_excel(source)
+            output = Path(tmp) / "old_output.xlsx"
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(["ОПТС", "Округ", "ФИО", "Link"])
+            ws.append(["ОРТС/8/1", "КАО", "Исполнитель", ""])
+            wb.save(output)
+            wb.close()
+
+            with self.assertRaisesRegex(
+                    RuntimeError, "Повторный запуск заблокирован"):
+                auto_create._validate_existing_output_is_protected(
+                    source, output, docs
+                )
 
     def test_pending_sidecar_is_atomic_and_terminal_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -39,10 +39,10 @@ from selenium.webdriver.support import expected_conditions as EC
 
 from shared import config as cfg
 from shared.ui import (click, wait_and_click, find_input_near_label,
-                wait_asud_loaded, wait_modal_closed, close_open_modals,
-                js_set_value, js_type_combobox, find_dropdown_options,
-                wait_pointer_events_auto, is_duplicate_warning,
-                set_driver_timeout)
+                 wait_asud_loaded, wait_modal_closed, close_open_modals,
+                 js_set_value, js_type_combobox, find_dropdown_options,
+                 wait_pointer_events_auto, is_duplicate_warning,
+                 set_driver_timeout, dismiss_system_notifications)
 from shared.correspondent import (fill_correspondent_field, match_strict, fio_to_initials,
                            extract_fio_from_text)
 from shared.addressee import add_addressee as _add_addressee_verified
@@ -197,8 +197,11 @@ def _append_output_row(path, doc_data, asud_id, status="OK"):
     okrug = None
     try:
         from shared.okrug_parser import okrug_from_textbody
-        okrug = okrug_from_textbody(doc_data.get("содержание"),
-                                     base_dir_fn=cfg.get_base_dir)
+        okrug = okrug_from_textbody(
+            doc_data.get("содержание"),
+            base_dir_fn=cfg.get_base_dir,
+            subject=doc_data.get("тема"),
+        )
     except Exception as e:
         log.warning(f"okrug_parser упал: {e}")
     fio = OKRUG_TO_FIO.get(okrug) if okrug else None
@@ -221,15 +224,78 @@ def _append_output_row(path, doc_data, asud_id, status="OK"):
         from shared.xlsx_lock import xlsx_lock
         with xlsx_lock(path, timeout=60):
             wb = openpyxl.load_workbook(path)
-            ws = wb.active
+            ws = wb["Резолюции"] if "Резолюции" in wb.sheetnames else wb.active
+
+            # Для режима СБИС эта же книга служит долговечным реестром
+            # идемпотентности. Сначала проверяем ключ на отдельном листе и
+            # только затем дописываем обе строки за одно сохранение файла.
+            # Поэтому повторный запуск не размножает ни документы, ни строки.
+            sbis_key = str(doc_data.get("sbis_key") or "").strip()
+            sbis_ws = None
+            if sbis_key:
+                if "СБИС" in wb.sheetnames:
+                    sbis_ws = wb["СБИС"]
+                else:
+                    sbis_ws = wb.create_sheet("СБИС")
+                    sbis_headers = [
+                        "Ключ", "SBIS ID", "Исходный файл", "Статус",
+                        "Номер АСУД", "Дата", "Краткое содержание",
+                        "Корреспондент",
+                    ]
+                    sbis_ws.append(sbis_headers)
+                    for cell in sbis_ws[1]:
+                        cell.font = openpyxl.styles.Font(bold=True)
+                    widths = [42, 38, 55, 18, 28, 20, 60, 45]
+                    for index, width in enumerate(widths, 1):
+                        sbis_ws.column_dimensions[
+                            openpyxl.utils.get_column_letter(index)
+                        ].width = width
+                    sbis_ws.freeze_panes = "A2"
+
+                normalised_key = sbis_key.replace("\\", "/").casefold()
+                for row_index in range(2, sbis_ws.max_row + 1):
+                    saved_key = str(sbis_ws.cell(row_index, 1).value or "").strip()
+                    if saved_key.replace("\\", "/").casefold() == normalised_key:
+                        sbis_ws.cell(row_index, 2).value = str(
+                            doc_data.get("sbis_id") or "")
+                        sbis_ws.cell(row_index, 3).value = str(
+                            doc_data.get("sbis_source_path") or "")
+                        sbis_ws.cell(row_index, 4).value = status
+                        sbis_ws.cell(row_index, 5).value = asud_id or ""
+                        sbis_ws.cell(row_index, 6).value = datetime.now().strftime(
+                            "%d.%m.%Y %H:%M:%S")
+                        sbis_ws.cell(row_index, 7).value = str(
+                            doc_data.get("содержание") or "")
+                        sbis_ws.cell(row_index, 8).value = str(
+                            doc_data.get("корреспондент") or "")
+                        wb.save(path)
+                        wb.close()
+                        log.info(
+                            f"  → {os.path.basename(path)}: запись СБИС "
+                            f"обновлена ({sbis_key})")
+                        return True
+
             ws.append([asud_id or "", okrug or "", fio or "", link_str, status_text])
+            if sbis_ws is not None:
+                sbis_ws.append([
+                    sbis_key,
+                    str(doc_data.get("sbis_id") or ""),
+                    str(doc_data.get("sbis_source_path") or ""),
+                    status,
+                    asud_id or "",
+                    datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
+                    str(doc_data.get("содержание") or ""),
+                    str(doc_data.get("корреспондент") or ""),
+                ])
             format_registry_before_save(ws, path, changed_row=ws.max_row)
             wb.save(path)
             wb.close()
         log.info(f"  → {os.path.basename(path)}: "
                  f"{asud_id or '—'} | {okrug or '—'} | {fio or '—'}")
+        return True
     except Exception as e:
         log.warning(f"Не удалось записать в {path}: {e}")
+        return False
 
 
 def load_excel(file_path):
@@ -275,7 +341,9 @@ def load_excel(file_path):
 
         clean_subject = re.sub(r'^(FW:|RE:|Fwd:)\s*', '',
                                str(subject).strip(), flags=re.IGNORECASE)
-        body_clean = _clean_body(body) if body else clean_subject
+        # Если тело состояло только из удаляемой служебной строки, не оставляем
+        # обязательное поле «Краткое содержание» пустым.
+        body_clean = (_clean_body(body) if body else "") or clean_subject
 
         fio, fio_src = extract_fio_from_text(body)
         if fio:
@@ -687,6 +755,24 @@ def add_addressee(driver, person_name):
     return _add_addressee_verified(driver, person_name, logger=log)
 
 
+def _get_document_addressees(doc_data):
+    """Адресаты документа: точечный override либо глобальная настройка."""
+    override = doc_data.get("addressees_override")
+    raw = (settings.get("addressees", cfg.DEFAULTS["addressees"])
+           if override is None else override)
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        raise RuntimeError("Список адресатов имеет неверный формат")
+    result = [str(value).strip() for value in raw if str(value).strip()]
+    # Пустой глобальный список исторически означает «не добавлять адресата» и
+    # используется отдельными режимами/тестами. Пустой точечный маршрут — уже
+    # ошибка конфигурации: иначе письмо уйдёт не назначенному сотруднику.
+    if override is not None and not result:
+        raise RuntimeError("Список адресатов пуст")
+    return result
+
+
 # ================= REGISTRATION =================
 
 _CAPTURE_ASUD_ID_JS = r"""
@@ -1079,54 +1165,32 @@ def close_card_and_wait_main(driver):
 
 # Статус последнего create_one_document — читают вызывающие (email-flow и т.п.),
 # чтобы решить куда переместить .msg (Завершено / Ошибки / оставить).
-# Значения: 'OK' | 'DUPLICATE' | 'DRAFT' | 'REGISTERED_ONLY' |
-# 'SUBMISSION_UNKNOWN' | 'FAILED'.
+# Значения: 'OK' | 'DUPLICATE' | 'DRAFT' | 'EXCLUDED' |
+# 'REGISTERED_ONLY' | 'SUBMISSION_UNKNOWN' | 'FAILED'.
 # 'FAILED' — дефолт; перетирается в успешных путях.
 _last_result = {"status": "UNKNOWN"}
-
-
-def _document_addressees(doc_data):
-    """Resolve the actual addressee list, honoring a fail-closed doc override."""
-    override = doc_data.get("addressees_override")
-    if override is not None:
-        if isinstance(override, str) or not isinstance(override, (list, tuple)):
-            raise RuntimeError("некорректный тематический маршрут адресата")
-        raw = override
-    else:
-        raw = settings.get("addressees", cfg.DEFAULTS["addressees"])
-        if isinstance(raw, str):
-            raw = [raw]
-
-    resolved = []
-    for value in raw or []:
-        name = str(value or "").strip()
-        if name and name not in resolved:
-            resolved.append(name)
-
-    if override is not None and not resolved:
-        # A matched GIS rule must never silently fall back to Basmanov.
-        raise RuntimeError("тематический маршрут ГИС ЖКХ не содержит адресата")
-
-    doc_data["assigned_addressees"] = resolved
-    return resolved
 
 
 def create_one_document(driver, doc_data, index, total):
     """Создаёт один входящий документ."""
     _last_result["status"] = "FAILED"
+    # Defense in depth for any future caller bypassing flows.email._process_doc.
+    # A business-excluded GIS document must not cause even the first UI click.
+    if doc_data.get("skip_asud_registration"):
+        _last_result["status"] = "EXCLUDED"
+        log.warning("Документ исключён политикой ГИС ЖКХ — АСУД не открываю")
+        return None
+
     log.info(f"{'='*50}")
     log.info(f"ДОКУМЕНТ {index}/{total}: {doc_data['тема'][:60]}")
     log.info(f"Корреспондент: {doc_data['корреспондент']} "
              f"({'найден ' + (doc_data['корр_источник'] or '') if doc_data['корр_найден'] else 'ЗАГЛУШКА'})")
     log.info(f"Тип: {doc_data['тип_название']}")
 
-    # Business routing is resolved before opening a card. A malformed matched
-    # GIS rule must fail before any UI side effect, never fall back to Basmanov.
-    try:
-        document_addressees = _document_addressees(doc_data)
-    except RuntimeError as exc:
-        log.error(f"Адресат не определён безопасно: {exc}")
-        raise
+    if not dismiss_system_notifications(driver):
+        raise RuntimeError(
+            "Системное уведомление АСУД перекрывает главную страницу"
+        )
 
     # [1/7] Кнопка создания
     el = WebDriverWait(driver, cfg.DEFAULTS["timeout"]).until(
@@ -1182,14 +1246,9 @@ def create_one_document(driver, doc_data, index, total):
                       override=doc_data.get("номер_обращения"))
     fill_corr_date(driver, override=doc_data.get("дата_обращения"))
 
+    document_addressees = _get_document_addressees(doc_data)
     if doc_data.get("addressees_override") is not None:
-        log.info(
-            "Тематический маршрут ГИС ЖКХ%s: %s",
-            (f" {doc_data.get('zhkh_topic_code')}"
-             if doc_data.get("zhkh_topic_code") else ""),
-            ", ".join(document_addressees),
-        )
-
+        log.info(f"Адресат по маршруту документа: {', '.join(document_addressees)}")
     for addr in document_addressees:
         if not add_addressee(driver, addr):
             _last_result["status"] = "FAILED"
@@ -1232,7 +1291,15 @@ def create_one_document(driver, doc_data, index, total):
     attach_path = find_msg_by_link(doc_data.get("link"), outlook_dir, dummy_path)
     if attach_path:
         log.info(f"Прикрепляю: {os.path.basename(attach_path)}")
-        attached = attach_content(driver, attach_path)
+        attached = attach_content(
+            driver,
+            attach_path,
+            msg_attachment_mode=settings.get(
+                "msg_attachment_mode", cfg.DEFAULTS["msg_attachment_mode"]
+            ),
+            email_subject=doc_data.get("_email_subject"),
+            email_body=doc_data.get("_email_body"),
+        )
         wait_modal_closed(driver)
         if attached:
             log.info(f"Документ {index}/{total}: вложение прикреплено ✓")
